@@ -9,7 +9,7 @@ class EvidenciaSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class InspeccionSerializer(serializers.ModelSerializer):
-    evidencias = EvidenciaSerializer(many=True, read_only=True) # Anida las fotos en la inspección
+    evidencias = EvidenciaSerializer(many=True, read_only=True) 
 
     class Meta:
         model = Inspeccion
