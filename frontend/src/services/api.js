@@ -1,28 +1,37 @@
 // este archivo se encarga de configurar una instancia de axios para hacer solicitudes HTTP a la API del backend.
 //  La baseURL se establece en "/api/v1", lo que significa que todas las solicitudes realizadas con esta instancia de axios se dirigirán a esa ruta base.
-//  Además, se establece el encabezado "Content-Type" en "application/json" para indicar que los datos enviados y recibidos serán en formato JSON.
 
 import axios from "axios";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import Login from "./pages/Login";
+import AdminPage from "./pages/AdminPage";
 
-const api = axios.create({
-  baseURL: "/api/v1",
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+// Componente para proteger las rutas privadas
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem("access_token");
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+}
 
-// Interceptor para enviar el token en cada petición
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem("access_token");
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  },
-);
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Ruta pública */}
+        <Route path="/login" element={<Login />} />
 
-export default api;
+        {/* Ruta protegida por JWT */}
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <AdminPage />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+}

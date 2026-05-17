@@ -1,3 +1,7 @@
+// Este componente representa la página de inicio de sesión, donde los usuarios pueden ingresar sus credenciales para acceder a su cuenta.
+//  Al enviar el formulario, se realiza una solicitud al backend para autenticar al usuario y obtener los tokens de acceso y actualización,
+//  que se almacenan en el localStorage para su uso posterior.
+
 import { useState } from "react";
 import api from "../services/api";
 
@@ -17,7 +21,6 @@ export default function Login() {
     try {
       const response = await api.post("/auth/login/", credentials);
 
-      // Guardamos los tokens en el navegador
       localStorage.setItem("access_token", response.data.access);
       localStorage.setItem("refresh_token", response.data.refresh);
 
@@ -31,7 +34,7 @@ export default function Login() {
   return (
     <div
       style={{
-        maxWidth: "400px",
+        maxWidth: "420px",
         margin: "100px auto",
         fontFamily: "sans-serif",
       }}
@@ -66,6 +69,7 @@ export default function Login() {
             background: "#0056b3",
             color: "white",
             border: "none",
+            borderRadius: "4px",
           }}
         >
           Entrar
