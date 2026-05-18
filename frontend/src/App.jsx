@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Login from "./pages/Login";
-import AdminPage from "./pages/AdminPage";
-import InspectionPage from "./pages/InspectionPage";
+import Login from "./pages/login";
+import AdminPage from "./pages/admin";
+import InspectionPage from "./pages/inspeccion";
 
 // Componente para proteger las rutas privadas
 function ProtectedRoute({ children }) {

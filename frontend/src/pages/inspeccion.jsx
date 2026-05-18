@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { calculateSHA256 } from "../utils/hash";
-import { saveEvidenceOffline } from "../services/offlineSync";
+import { saveEvidenceOffline } from "../services/offline";
 
 export default function InspectionPage() {
   const [status, setStatus] = useState("");

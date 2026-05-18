@@ -2,36 +2,18 @@
 //  La baseURL se establece en "/api/v1", lo que significa que todas las solicitudes realizadas con esta instancia de axios se dirigirán a esa ruta base.
 
 import axios from "axios";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Login from "./pages/Login";
-import AdminPage from "./pages/AdminPage";
 
-// Componente para proteger las rutas privadas
-function ProtectedRoute({ children }) {
+const api = axios.create({
+  baseURL: "/api/v1",
+});
+
+// Interceptor: adjunta el token JWT en cada petición
+api.interceptors.request.use((config) => {
   const token = localStorage.getItem("access_token");
-  if (!token) {
-    return <Navigate to="/login" replace />;
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
   }
-  return children;
-}
+  return config;
+});
 
-export default function App() {
-  return (
-    <BrowserRouter>
-      <Routes>
-        {/* Ruta pública */}
-        <Route path="/login" element={<Login />} />
-
-        {/* Ruta protegida por JWT */}
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <AdminPage />
-            </ProtectedRoute>
-          }
-        />
-      </Routes>
-    </BrowserRouter>
-  );
-}
+export default api;

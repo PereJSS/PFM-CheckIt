@@ -10,7 +10,7 @@ export default function AdminPage() {
   useEffect(() => {
     const fetchInspecciones = async () => {
       try {
-        const response = await api.get("/inspections/");
+        const response = await api.get("/inspecciones/");
         setInspecciones(response.data);
       } catch (err) {
         setError("Error al cargar datos. Tu sesión puede haber caducado.");
