@@ -7,6 +7,11 @@ from .models import Inspeccion
 from .serializers import InspeccionSerializer
 from .services.pdf_generator import generar_informe_base
 from .services.pdf_signer import firmar_pdf_reclamacion
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
+from django.shortcuts import get_object_or_404
+from .models import Evidencia
+from django.http import HttpResponse
 
 class InspeccionViewSet(viewsets.ModelViewSet):
     queryset = Inspeccion.objects.all()
@@ -45,5 +50,31 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         return FileResponse(
             open(signed_pdf, 'rb'), 
             as_attachment=True, 
-            filename=f"Reclamacion_Ckeckii_{inspeccion.id}.pdf"
+            filename=f"Reclamacion_CheckIt_{inspeccion.id}.pdf"
         )
+        
+        class EvidenceAuditView(APIView):
+    # Este endpoint es público para permitir la verificación de la integridad matemática sin necesidad de autenticación.
+         permission_classes = [AllowAny]
+
+    def get(self, request, id):
+        """ GET /api/v1/audit/{id}/ """
+        evidencia = get_object_or_404(Evidencia, id=id)
+        return Response({
+            "evidencia_id": evidencia.id,
+            "hash_sha256": evidencia.hash,
+            "tsa_timestamp": evidencia.tsa_timestamp,
+            "mensaje": "Integridad matemática verificada correctamente."
+        })
+
+class EvidenceTokenView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, id):
+        """ GET /api/v1/audit/{id}/token/ """
+        evidencia = get_object_or_404(Evidencia, id=id)
+        
+        # Devuelve el archivo binario .tsr para su validación manual [5]
+        response = HttpResponse(evidencia.tsa_token, content_type='application/timestamp-reply')
+        response['Content-Disposition'] = f'attachment; filename="evidencia_{evidencia.id}_token.tsr"'
+        return response
