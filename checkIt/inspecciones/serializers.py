@@ -9,7 +9,8 @@ class EvidenciaSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class InspeccionSerializer(serializers.ModelSerializer):
-    evidencias = EvidenciaSerializer(many=True, read_only=True) 
+    evidencias = EvidenciaSerializer(many=True, read_only=True)
+    propiedad_nombre = serializers.CharField(source='propiedad.nombre', read_only=True)
 
     class Meta:
         model = Inspeccion

@@ -20,7 +20,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     # Filtramos las inspecciones según el rol del usuario
     def get_queryset(self):
         usuario = self.request.user
-        if usuario.es_administrador():
+        if usuario.is_admin():
             return Inspeccion.objects.all()
         return Inspeccion.objects.filter(operario=usuario)
 
@@ -30,7 +30,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         usuario = request.user
         
         # Seguridad: Solo los Property Managers (Admin) pueden descargar PDFs
-        if not usuario.es_administrador():
+        if not usuario.is_admin():
             return Response(
                 {"error": "No tienes permisos para descargar informes periciales."}, 
                 status=403
@@ -52,17 +52,18 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             as_attachment=True, 
             filename=f"Reclamacion_CheckIt_{inspeccion.id}.pdf"
         )
-        
-        class EvidenceAuditView(APIView):
+
+
+class EvidenceAuditView(APIView):
     # Este endpoint es público para permitir la verificación de la integridad matemática sin necesidad de autenticación.
-         permission_classes = [AllowAny]
+    permission_classes = [AllowAny]
 
     def get(self, request, id):
         """ GET /api/v1/audit/{id}/ """
         evidencia = get_object_or_404(Evidencia, id=id)
         return Response({
             "evidencia_id": evidencia.id,
-            "hash_sha256": evidencia.hash,
+            "hash_sha256": evidencia.hash_sha256,
             "tsa_timestamp": evidencia.tsa_timestamp,
             "mensaje": "Integridad matemática verificada correctamente."
         })

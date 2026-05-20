@@ -27,6 +27,9 @@ class Evidencia(models.Model):
     foto = models.ImageField(upload_to="evidencias/")
     descripcion = models.TextField(blank=True, null=True)
     fecha_captura = models.DateTimeField(auto_now_add=True)
+    hash_sha256 = models.CharField(max_length=64, blank=True, null=True, verbose_name="Hash SHA-256")
+    tsa_timestamp = models.DateTimeField(blank=True, null=True, verbose_name="Timestamp TSA")
+    tsa_token = models.BinaryField(blank=True, null=True, verbose_name="Token TSA (.tsr)")
 
     def __str__(self):
         return f"Evidencia de {self.inspeccion} tomada por {self.inspeccion.operario.username if self.inspeccion.operario else 'Sin operario'} el {self.fecha_captura.strftime('%Y-%m-%d %H:%M:%S')}"

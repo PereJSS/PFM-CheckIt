@@ -1,7 +1,3 @@
-// Este componente representa la página de inicio de sesión, donde los usuarios pueden ingresar sus credenciales para acceder a su cuenta.
-//  Al enviar el formulario, se realiza una solicitud al backend para autenticar al usuario y obtener los tokens de acceso y actualización,
-//  que se almacenan en el localStorage para su uso posterior.
-
 import { useState } from "react";
 import api from "../services/api";
 
@@ -11,6 +7,7 @@ export default function Login() {
     password: "",
   });
   const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const handleChange = (e) => {
     setCredentials({ ...credentials, [e.target.name]: e.target.value });
@@ -18,63 +15,86 @@ export default function Login() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setLoading(true);
+    setError(null);
     try {
       const response = await api.post("/auth/login/", credentials);
-
       localStorage.setItem("access_token", response.data.access);
       localStorage.setItem("refresh_token", response.data.refresh);
 
-      alert("¡Login exitoso! Tokens guardados.");
-      window.location.href = "/";
+      const meResponse = await api.get("/auth/me/");
+      const role = meResponse.data.role;
+      window.location.href = role === "ADMINISTRADOR" ? "/" : "/operario";
     } catch (err) {
       setError("Credenciales incorrectas. Inténtalo de nuevo.");
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div
-      style={{
-        maxWidth: "420px",
-        margin: "100px auto",
-        fontFamily: "sans-serif",
-      }}
-    >
-      <h2>Iniciar Sesión en Ckeckii</h2>
-      {error && <p style={{ color: "red" }}>{error}</p>}
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
+      <div className="w-full max-w-sm">
+        {/* Logo / marca */}
+        <div className="text-center mb-10">
+          <span className="text-3xl font-bold tracking-tight text-slate-900">
+            Ckeckii
+          </span>
+          <p className="mt-1 text-sm text-slate-500">
+            Plataforma de inspecciones certificadas
+          </p>
+        </div>
 
-      <form
-        onSubmit={handleSubmit}
-        style={{ display: "flex", flexDirection: "column", gap: "15px" }}
-      >
-        <input
-          type="text"
-          name="username"
-          placeholder="Nombre de usuario"
-          onChange={handleChange}
-          required
-          style={{ padding: "10px" }}
-        />
-        <input
-          type="password"
-          name="password"
-          placeholder="Contraseña"
-          onChange={handleChange}
-          required
-          style={{ padding: "10px" }}
-        />
-        <button
-          type="submit"
-          style={{
-            padding: "10px",
-            background: "#0056b3",
-            color: "white",
-            border: "none",
-            borderRadius: "4px",
-          }}
-        >
-          Entrar
-        </button>
-      </form>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+          <h1 className="text-lg font-semibold text-slate-800 mb-6">
+            Iniciar sesión
+          </h1>
+
+          {error && (
+            <div className="mb-4 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1.5">
+                Usuario
+              </label>
+              <input
+                type="text"
+                name="username"
+                placeholder="nombre de usuario"
+                onChange={handleChange}
+                required
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1.5">
+                Contraseña
+              </label>
+              <input
+                type="password"
+                name="password"
+                placeholder="••••••••"
+                onChange={handleChange}
+                required
+                className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="mt-2 w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 transition"
+            >
+              {loading ? "Entrando..." : "Entrar"}
+            </button>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }

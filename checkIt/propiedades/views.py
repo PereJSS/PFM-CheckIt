@@ -7,4 +7,4 @@ from .serializers import PropiedadSerializer
 
 class PropiedadViewSet(viewsets.ModelViewSet):
     queryset = Propiedad.objects.all()
-    serializer_propiedad = PropiedadSerializer
+    serializer_class = PropiedadSerializer
