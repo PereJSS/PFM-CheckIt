@@ -16,16 +16,29 @@ const ESTADO = {
   },
 };
 
+const FORM_EMPTY = { propiedad: "", operario: "" };
+
 export default function AdminPage() {
   const [inspections, setInspections] = useState([]);
+  const [propiedades, setPropiedades] = useState([]);
+  const [operarios, setOperarios] = useState([]);
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(FORM_EMPTY);
+  const [formError, setFormError] = useState(null);
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
+  const loadInspections = () =>
     api
       .get("/inspecciones/")
       .then((res) => setInspections(res.data))
       .catch(() => setError("No se pudieron cargar las inspecciones."));
+
+  useEffect(() => {
+    loadInspections();
+    api.get("/propiedades/").then((res) => setPropiedades(res.data));
+    api.get("/usuarios/operarios/").then((res) => setOperarios(res.data));
   }, []);
 
   const handleDownloadPDF = async (id) => {
@@ -41,7 +54,7 @@ export default function AdminPage() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `Reclamacion_Ckeckii_${id}.pdf`;
+      a.download = `Reclamacion_CheckIt_${id}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -59,13 +72,37 @@ export default function AdminPage() {
     window.location.href = "/login";
   };
 
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setFormError(null);
+    if (!form.propiedad || !form.operario) {
+      setFormError("Selecciona una propiedad y un operario.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.post("/inspecciones/", {
+        propiedad: Number(form.propiedad),
+        operario: Number(form.operario),
+        estado: "PENDIENTE",
+      });
+      setForm(FORM_EMPTY);
+      setShowForm(false);
+      loadInspections();
+    } catch {
+      setFormError("No se pudo crear la inspección. Inténtalo de nuevo.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Navbar */}
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-xl font-bold tracking-tight text-slate-900">
-            Ckeckii
+            CheckIt
           </span>
           <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
             Admin
@@ -80,15 +117,91 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-10">
-        {/* Título */}
-        <div className="mb-8">
-          <h1 className="text-2xl font-semibold text-slate-900">
-            Inspecciones
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Gestión de check-outs y pruebas periciales
-          </p>
+        {/* Título + botón nueva inspección */}
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-900">
+              Inspecciones
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Gestión de check-outs y pruebas periciales
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              setShowForm((v) => !v);
+              setFormError(null);
+              setForm(FORM_EMPTY);
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition"
+          >
+            {showForm ? "Cancelar" : "+ Nueva inspección"}
+          </button>
         </div>
+
+        {/* Formulario de nueva inspección */}
+        {showForm && (
+          <form
+            onSubmit={handleSubmit}
+            className="mb-8 bg-white border border-slate-200 rounded-xl p-6 shadow-sm"
+          >
+            <h2 className="text-base font-semibold text-slate-800 mb-4">
+              Asignar nueva inspección
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  Propiedad
+                </label>
+                <select
+                  value={form.propiedad}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, propiedad: e.target.value }))
+                  }
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Selecciona una propiedad…</option>
+                  {propiedades.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.nombre}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  Operario
+                </label>
+                <select
+                  value={form.operario}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, operario: e.target.value }))
+                  }
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Selecciona un operario…</option>
+                  {operarios.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.nombre}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {formError && (
+              <p className="mt-3 text-xs text-red-600">{formError}</p>
+            )}
+            <div className="mt-4 flex justify-end">
+              <button
+                type="submit"
+                disabled={saving}
+                className="px-5 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
+              >
+                {saving ? "Asignando…" : "Crear inspección"}
+              </button>
+            </div>
+          </form>
+        )}
 
         {error && (
           <div className="mb-6 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
@@ -106,6 +219,9 @@ export default function AdminPage() {
                 </th>
                 <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   Propiedad
+                </th>
+                <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  Operario
                 </th>
                 <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   Fecha
@@ -131,6 +247,9 @@ export default function AdminPage() {
                     </td>
                     <td className="px-5 py-3.5 font-medium text-slate-800">
                       {insp.propiedad_nombre}
+                    </td>
+                    <td className="px-5 py-3.5 text-slate-500">
+                      {insp.operario_nombre ?? "—"}
                     </td>
                     <td className="px-5 py-3.5 text-slate-500">
                       {new Date(insp.fecha_creacion).toLocaleDateString(
@@ -167,7 +286,7 @@ export default function AdminPage() {
               {inspections.length === 0 && !error && (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="px-5 py-10 text-center text-slate-400 text-sm"
                   >
                     No hay inspecciones registradas.

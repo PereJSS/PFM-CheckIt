@@ -211,7 +211,7 @@ def generate_claim_pdf(inspection) -> bytes:
     story.append(Spacer(1, 0.8 * cm))
     story.append(HRFlowable(width='100%', thickness=0.5, color=MID_GREY, spaceAfter=6))
     story.append(Paragraph(
-        'Este documento ha sido generado automáticamente por la plataforma Ckeckii. '
+        'Este documento ha sido generado automáticamente por la plataforma CheckIt. '
         'Las evidencias contenidas en este informe disponen de hash SHA-256 calculado '
         'en el dispositivo de captura y verificado en servidor, garantizando su integridad '
         'e inmutabilidad conforme a los estándares de cadena de custodia digital. '
@@ -269,10 +269,71 @@ def generar_informe_base(inspeccion):
         for ev in evidencias:
             story.append(Paragraph(f'• {ev.descripcion or "Sin descripción"} — {ev.fecha_captura.strftime("%d/%m/%Y %H:%M")}', s['value']))
 
+    # ── Integridad Criptográfica y Sello de Tiempo ───────────────────────────
+    story.append(Spacer(1, 0.4 * cm))
+    story.append(Paragraph('Integridad Criptográfica y Sello de Tiempo (RFC 3161)', s['h2']))
+
+    ev_con_hash = [ev for ev in evidencias if ev.hash_sha256 or ev.tsa_timestamp]
+    if ev_con_hash:
+        tsa_header = [
+            Paragraph('<b>#</b>', s['small']),
+            Paragraph('<b>Hash SHA-256</b>', s['small']),
+            Paragraph('<b>Sello TSA (RFC 3161)</b>', s['small']),
+        ]
+        tsa_rows = [tsa_header]
+        for ev in ev_con_hash:
+            ts_str = ev.tsa_timestamp.strftime('%d/%m/%Y %H:%M:%S UTC') if ev.tsa_timestamp else '—'
+            tsa_rows.append([
+                Paragraph(str(ev.id), s['small']),
+                Paragraph(ev.hash_sha256 or '—', s['small']),
+                Paragraph(ts_str, s['small']),
+            ])
+        available_w = PAGE_W - 2 * MARGIN
+        tsa_table = Table(tsa_rows, colWidths=[1.5 * cm, available_w - 7 * cm, 5.5 * cm])
+        tsa_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), PRIMARY),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_GREY]),
+            ('GRID', (0, 0), (-1, -1), 0.25, MID_GREY),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        story.append(tsa_table)
+    else:
+        story.append(Paragraph(
+            'No se dispone de sellos de tiempo TSA para las evidencias de esta inspección.',
+            s['value'],
+        ))
+
+    story.append(Spacer(1, 0.3 * cm))
+
+    # ── Firma Digital X.509 ──────────────────────────────────────────────────
+    story.append(Paragraph('Firma Digital X.509 / PKCS#7', s['h2']))
+    cert_path = os.getenv('PDF_SIGNING_CERT_PATH', 'certs/signing.crt')
+    firma_rows = [
+        ['Tipo de firma', 'X.509 / PKCS#7 (PDF con escritura incremental)'],
+        ['Algoritmo', 'RSA + SHA-256'],
+        ['Campo de firma', 'Firma_Pericial_CheckIt'],
+        ['Certificado', os.path.basename(cert_path)],
+        ['Fecha de emisión', localtime(tz_now()).strftime('%d/%m/%Y %H:%M:%S')],
+    ]
+    story.append(_kv_table(firma_rows, col_widths=[4.5 * cm, PAGE_W - 2 * MARGIN - 4.5 * cm]))
+    story.append(Spacer(1, 0.3 * cm))
+    story.append(Paragraph(
+        'La firma digital X.509 integrada en este PDF garantiza su inmutabilidad legal desde el momento '
+        'de la firma. Para verificarla, ábralo con Adobe Acrobat Reader o cualquier validador PDF '
+        'compatible con firmas PKCS#7.',
+        s['small'],
+    ))
+
     story.append(Spacer(1, 0.8 * cm))
     story.append(HRFlowable(width='100%', thickness=0.5, color=MID_GREY, spaceAfter=6))
     story.append(Paragraph(
-        'Documento generado por Ckeckii. Las evidencias contienen hash SHA-256 '
+        'Documento generado por CheckIt. Las evidencias contienen hash SHA-256 '
         'garantizando su integridad e inmutabilidad.',
         s['legal'],
     ))

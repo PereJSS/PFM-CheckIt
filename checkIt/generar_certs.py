@@ -22,7 +22,7 @@ def generar():
 
     # 2. Generar Certificado Público
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, u"Ckeckii Dev Local CA"),
+        x509.NameAttribute(NameOID.COMMON_NAME, u"CheckIt Dev Local CA"),
     ])
     cert = x509.CertificateBuilder().subject_name(
         subject

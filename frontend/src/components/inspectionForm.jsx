@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { calculateSHA256 } from "../utils/hash";
 import { saveEvidenceOffline } from "../services/offline";
+import api from "../services/api";
 
 const ROOMS = [
   "Salón",
@@ -205,7 +206,17 @@ export default function InspectionForm({ inspectionId }) {
 
   const handleComplete = async () => {
     setStatus({ type: "loading", text: "Finalizando inspección…" });
-    alert("Inspección marcada como completada.");
+    try {
+      await api.patch(`/inspecciones/${inspectionId}/`, {
+        estado: "COMPLETADA",
+      });
+      window.location.replace("/operario");
+    } catch {
+      setStatus({
+        type: "error",
+        text: "Error al finalizar la inspección. Inténtalo de nuevo.",
+      });
+    }
   };
 
   return (

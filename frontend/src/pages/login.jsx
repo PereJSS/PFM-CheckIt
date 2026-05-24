@@ -38,7 +38,7 @@ export default function Login() {
         {/* Logo / marca */}
         <div className="text-center mb-10">
           <span className="text-3xl font-bold tracking-tight text-slate-900">
-            Ckeckii
+            CheckIt
           </span>
           <p className="mt-1 text-sm text-slate-500">
             Plataforma de inspecciones certificadas

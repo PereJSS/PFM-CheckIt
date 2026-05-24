@@ -38,6 +38,9 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+
+        {/* Cualquier ruta desconocida redirige al login */}
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </BrowserRouter>
   );
