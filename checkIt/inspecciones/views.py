@@ -21,7 +21,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         usuario = self.request.user
         if usuario.is_admin():
-            return Inspeccion.objects.all()
+            return Inspeccion.objects.filter(propiedad__owner=usuario)
         return Inspeccion.objects.filter(operario=usuario)
 
     # Creamos el endpoint: GET /api/v1/inspecciones/{id}/claim-report/
