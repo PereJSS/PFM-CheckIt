@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/login";
+import Register from "./pages/register";
 import AdminPage from "./pages/admin";
 import InspectionPage from "./pages/inspeccion";
 
@@ -18,6 +19,7 @@ export default function App() {
       <Routes>
         {/* Rutas públicas */}
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
 
         {/* Ruta protegida para el operario */}
         <Route

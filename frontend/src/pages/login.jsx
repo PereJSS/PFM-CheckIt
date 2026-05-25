@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import api from "../services/api";
 
 export default function Login() {
@@ -94,6 +95,16 @@ export default function Login() {
             </button>
           </form>
         </div>
+
+        <p className="text-center text-sm text-slate-500 mt-6">
+          ¿No tienes cuenta?{" "}
+          <Link
+            to="/register"
+            className="text-blue-600 font-medium hover:underline"
+          >
+            Regístrate
+          </Link>
+        </p>
       </div>
     </div>
   );
