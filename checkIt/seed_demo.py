@@ -24,7 +24,7 @@ from inspecciones.models import Inspeccion, Evidencia
 Evidencia.objects.all().delete()
 Inspeccion.objects.all().delete()
 Propiedad.objects.all().delete()
-User.objects.filter(username__in=["admin_demo", "operario1", "operario2"]).delete()
+User.objects.filter(username__in=["admin_demo", "admin_partner", "operario1", "operario2"]).delete()
 print("Datos anteriores eliminados.")
 
 # ── Usuarios ────────────────────────────────────────────────────────────────
@@ -34,6 +34,14 @@ admin = User.objects.create_user(
     first_name="Administrador",
     last_name="CheckIt",
     email="admin@checkit.local",
+    role=User.Role.ADMIN,
+)
+admin_partner = User.objects.create_user(
+    username="admin_partner",
+    password="checkIt2026!",
+    first_name="Paula",
+    last_name="Serrano",
+    email="partner@checkit.local",
     role=User.Role.ADMIN,
 )
 op1 = User.objects.create_user(
@@ -52,32 +60,60 @@ op2 = User.objects.create_user(
     email="lucia@checkit.local",
     role=User.Role.OPERARIO,
 )
-print(f"Usuarios creados: {admin}, {op1}, {op2}")
+print(f"Usuarios creados: {admin}, {admin_partner}, {op1}, {op2}")
 
 # ── Propiedades ─────────────────────────────────────────────────────────────
 p1 = Propiedad.objects.create(
+    owner=admin,
     nombre="Apartamento Mar Azul",
     direccion="Calle del Mar, 14 — Alicante",
     descripcion="Apartamento de 2 habitaciones con vistas al mar.",
 )
 p2 = Propiedad.objects.create(
+    owner=admin,
     nombre="Villa Las Palmeras",
     direccion="Avda. de las Palmeras, 3 — Benidorm",
     descripcion="Villa con piscina privada y jardín.",
 )
 p3 = Propiedad.objects.create(
+    owner=admin,
     nombre="Estudio Centro Histórico",
     direccion="Calle Mayor, 8, 3º A — Valencia",
     descripcion="Estudio reformado en pleno centro histórico.",
 )
-print(f"Propiedades creadas: {p1.nombre}, {p2.nombre}, {p3.nombre}")
+p4 = Propiedad.objects.create(
+    owner=admin_partner,
+    nombre="Ático Mirador del Puerto",
+    direccion="Paseo Marítimo, 22 — Málaga",
+    descripcion="Ático luminoso con terraza panorámica.",
+)
+p5 = Propiedad.objects.create(
+    owner=admin_partner,
+    nombre="Casa Jardín La Huerta",
+    direccion="Camino de la Huerta, 9 — Murcia",
+    descripcion="Casa de campo con jardín y zona de barbacoa.",
+)
+p6 = Propiedad.objects.create(
+    owner=admin_partner,
+    nombre="Loft Ruzafa Central",
+    direccion="Calle Literato Azorín, 17 — Valencia",
+    descripcion="Loft moderno en barrio céntrico.",
+)
+print(
+    f"Propiedades creadas para {admin.username}: {p1.nombre}, {p2.nombre}, {p3.nombre}"
+)
+print(
+    f"Propiedades creadas para {admin_partner.username}: {p4.nombre}, {p5.nombre}, {p6.nombre}"
+)
 
 # ── Inspecciones ─────────────────────────────────────────────────────────────
 i1 = Inspeccion.objects.create(propiedad=p1, operario=op1, estado=Inspeccion.Estado.PENDIENTE)
 i2 = Inspeccion.objects.create(propiedad=p2, operario=op1, estado=Inspeccion.Estado.EN_PROGRESO)
 i3 = Inspeccion.objects.create(propiedad=p3, operario=op2, estado=Inspeccion.Estado.COMPLETADA)
-i4 = Inspeccion.objects.create(propiedad=p1, operario=op2, estado=Inspeccion.Estado.PENDIENTE)
-print(f"Inspecciones creadas: #{i1.pk}, #{i2.pk}, #{i3.pk}, #{i4.pk}")
+i4 = Inspeccion.objects.create(propiedad=p4, operario=op2, estado=Inspeccion.Estado.PENDIENTE)
+i5 = Inspeccion.objects.create(propiedad=p5, operario=op1, estado=Inspeccion.Estado.EN_PROGRESO)
+i6 = Inspeccion.objects.create(propiedad=p6, operario=op2, estado=Inspeccion.Estado.COMPLETADA)
+print(f"Inspecciones creadas: #{i1.pk}, #{i2.pk}, #{i3.pk}, #{i4.pk}, #{i5.pk}, #{i6.pk}")
 
 # ── Generador de imágenes de prueba ──────────────────────────────────────────
 DAÑOS = [
@@ -116,15 +152,17 @@ def _crear_imagen(etiqueta: str, bg: tuple, mancha: tuple) -> bytes:
     return buf.getvalue()
 
 # ── Evidencias ───────────────────────────────────────────────────────────────
-# Inspección #2 (EN_PROGRESO) → 3 evidencias
-# Inspección #3 (COMPLETADA)  → 3 evidencias
+# Inspección #2 (EN_PROGRESO) → 2 evidencias
+# Inspección #3 (COMPLETADA)  → 2 evidencias
+# Inspección #5 (EN_PROGRESO) → 1 evidencia
+# Inspección #6 (COMPLETADA)  → 1 evidencia
 evidencias_spec = [
     (i2, DAÑOS[0]),
     (i2, DAÑOS[1]),
-    (i2, DAÑOS[2]),
+    (i3, DAÑOS[2]),
     (i3, DAÑOS[3]),
-    (i3, DAÑOS[4]),
-    (i3, DAÑOS[5]),
+    (i5, DAÑOS[4]),
+    (i6, DAÑOS[5]),
 ]
 
 for inspeccion, (bg, mancha, etiqueta, sala) in evidencias_spec:
@@ -143,5 +181,6 @@ for inspeccion, (bg, mancha, etiqueta, sala) in evidencias_spec:
 print()
 print("=== Credenciales de acceso ===")
 print("  Admin    → usuario: admin_demo  / contraseña: checkIt2026!")
+print("  Admin    → usuario: admin_partner / contraseña: checkIt2026!")
 print("  Operario → usuario: operario1   / contraseña: checkIt2026!")
 print("  Operario → usuario: operario2   / contraseña: checkIt2026!")
