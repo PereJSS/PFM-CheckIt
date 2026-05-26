@@ -3,8 +3,10 @@
 
 import axios from "axios";
 
+const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
+
 const api = axios.create({
-  baseURL: "/api/v1",
+  baseURL: apiBaseUrl,
 });
 
 // Interceptor de petición: adjunta el token JWT en cada petición
@@ -29,7 +31,7 @@ api.interceptors.response.use(
 
       if (refreshToken) {
         try {
-          const { data } = await axios.post("/api/v1/auth/refresh/", {
+          const { data } = await axios.post(`${apiBaseUrl}/auth/refresh/`, {
             refresh: refreshToken,
           });
           localStorage.setItem("access_token", data.access);
