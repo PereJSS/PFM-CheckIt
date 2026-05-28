@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { calculateSHA256 } from "../utils/hash";
-import { saveEvidenceOffline } from "../services/offline";
+import {
+  getPendingEvidencesByInspection,
+  saveEvidenceOffline,
+} from "../services/offline";
 import api from "../services/api";
 
 const ROOMS = [
@@ -298,21 +301,46 @@ export default function InspectionForm({ inspectionId }) {
   const processFile = async (file) => {
     setCameraOpen(false);
     setStatus({ type: "loading", text: "Calculando huella SHA-256…" });
+
+    if (!room) {
+      setStatus({
+        type: "error",
+        text: "Selecciona una estancia antes de adjuntar evidencia.",
+      });
+      return;
+    }
+
     try {
       const hash = await calculateSHA256(file);
-      await saveEvidenceOffline({
-        inspectionId,
-        room,
-        description,
-        hash,
-        file,
-        timestamp: new Date().toISOString(),
-        synced: false,
-      });
-      setStatus({
-        type: "success",
-        text: "Evidencia sellada y guardada correctamente.",
-      });
+
+      const formData = new FormData();
+      formData.append("foto", file);
+      formData.append("descripcion", description || `${room}`);
+      formData.append("hash_sha256", hash);
+
+      try {
+        await api.post(`/inspecciones/${inspectionId}/evidencias/`, formData);
+        setStatus({
+          type: "success",
+          text: "Evidencia subida y sellada correctamente.",
+        });
+      } catch {
+        // Si falla la subida, conservar evidencia local evita pérdida de datos.
+        await saveEvidenceOffline({
+          inspectionId,
+          room,
+          description,
+          hash,
+          file,
+          timestamp: new Date().toISOString(),
+          synced: false,
+        });
+        setStatus({
+          type: "info",
+          text: "Sin conexión o error de red: evidencia guardada en el móvil. Aún no aparecerá en el PDF hasta sincronizar.",
+        });
+      }
+
       setStep(1);
       setRoom("");
       setDescription("");
@@ -343,6 +371,15 @@ export default function InspectionForm({ inspectionId }) {
   };
 
   const handleComplete = async () => {
+    const pending = await getPendingEvidencesByInspection(inspectionId);
+    if (pending.length > 0) {
+      setStatus({
+        type: "error",
+        text: "Tienes evidencias pendientes de sincronizar en este móvil. No finalices la inspección hasta que se suban para que aparezcan en el PDF.",
+      });
+      return;
+    }
+
     setStatus({ type: "loading", text: "Finalizando inspección…" });
     try {
       await api.patch(`/inspecciones/${inspectionId}/`, {

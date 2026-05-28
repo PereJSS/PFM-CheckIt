@@ -1,5 +1,6 @@
 
 from rest_framework import viewsets
+from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.http import FileResponse
@@ -51,6 +52,49 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             open(signed_pdf, 'rb'), 
             as_attachment=True, 
             filename=f"Reclamacion_CheckIt_{inspeccion.id}.pdf"
+        )
+
+    @action(detail=True, methods=['post'], url_path='evidencias')
+    def upload_evidence(self, request, pk=None):
+        """POST /api/v1/inspecciones/{id}/evidencias/"""
+        inspeccion = self.get_object()
+        usuario = request.user
+
+        # Solo el operario asignado o el admin dueño de la propiedad pueden adjuntar evidencia.
+        can_upload = (
+            (inspeccion.operario_id == usuario.id)
+            or (usuario.is_admin() and inspeccion.propiedad.owner_id == usuario.id)
+        )
+        if not can_upload:
+            return Response(
+                {"error": "No tienes permisos para añadir evidencias a esta inspección."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        foto = request.FILES.get('foto')
+        if not foto:
+            return Response(
+                {"error": "El campo 'foto' es obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        evidencia = Evidencia.objects.create(
+            inspeccion=inspeccion,
+            foto=foto,
+            descripcion=request.data.get('descripcion') or '',
+            hash_sha256=request.data.get('hash_sha256') or None,
+        )
+
+        return Response(
+            {
+                "id": evidencia.id,
+                "inspeccion": inspeccion.id,
+                "descripcion": evidencia.descripcion,
+                "hash_sha256": evidencia.hash_sha256,
+                "foto": evidencia.foto.url if evidencia.foto else None,
+                "fecha_captura": evidencia.fecha_captura,
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

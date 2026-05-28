@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import InspectionForm from "../components/inspectionForm";
 import api from "../services/api";
+import { syncPendingEvidences } from "../services/offline";
 
 const ESTADO_BADGE = {
   PENDIENTE: "bg-slate-100 text-slate-600 ring-slate-200",
@@ -18,6 +19,7 @@ export default function InspectionPage() {
   const [seleccionada, setSeleccionada] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [syncInfo, setSyncInfo] = useState(null);
 
   const cargar = () =>
     api
@@ -28,6 +30,48 @@ export default function InspectionPage() {
 
   useEffect(() => {
     cargar();
+
+    const syncOfflineNow = async () => {
+      if (!navigator.onLine) return;
+
+      const result = await syncPendingEvidences(async (evidence) => {
+        const formData = new FormData();
+        const fallbackName = `evidencia_${Date.now()}.jpg`;
+
+        formData.append(
+          "foto",
+          evidence.file,
+          evidence.file?.name || fallbackName,
+        );
+        formData.append(
+          "descripcion",
+          evidence.description || evidence.room || "Evidencia sin descripción",
+        );
+
+        if (evidence.hash) {
+          formData.append("hash_sha256", evidence.hash);
+        }
+
+        await api.post(
+          `/inspecciones/${evidence.inspectionId}/evidencias/`,
+          formData,
+        );
+      });
+
+      if (result.syncedCount > 0) {
+        setSyncInfo(
+          `Se sincronizaron ${result.syncedCount} evidencias pendientes.`,
+        );
+        cargar();
+      }
+    };
+
+    syncOfflineNow();
+    window.addEventListener("online", syncOfflineNow);
+
+    return () => {
+      window.removeEventListener("online", syncOfflineNow);
+    };
   }, []);
 
   const activas = inspecciones.filter(
@@ -58,6 +102,9 @@ export default function InspectionPage() {
       </header>
 
       <main className="max-w-lg mx-auto px-4 py-10">
+        {syncInfo && (
+          <p className="mb-3 text-sm text-emerald-700">{syncInfo}</p>
+        )}
         {loading && (
           <p className="text-sm text-slate-500">Cargando inspecciones…</p>
         )}
