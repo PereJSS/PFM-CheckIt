@@ -21,20 +21,35 @@ function CameraModal({ onCapture, onClose }) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    let mounted = true;
+
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("Tu navegador no soporta acceso a la cámara.");
       return;
     }
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: "environment" }, audio: false })
-      .then((stream) => {
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
+
+    const initCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+
+        if (!mounted) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
         }
-        setReady(true);
-      })
-      .catch((err) => {
+
+        streamRef.current = stream;
+
+        const videoEl = videoRef.current;
+        if (videoEl) {
+          videoEl.srcObject = stream;
+
+          // En móvil (iOS/Android), forzar play evita vista negra tras conceder permiso.
+          await videoEl.play().catch(() => null);
+        }
+      } catch (err) {
         if (
           err.name === "NotAllowedError" ||
           err.name === "PermissionDeniedError"
@@ -50,9 +65,19 @@ function CameraModal({ onCapture, onClose }) {
         } else {
           setError("No se pudo acceder a la cámara: " + err.message);
         }
-      });
+      }
+    };
+
+    initCamera();
 
     return () => {
+      mounted = false;
+      setReady(false);
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -119,6 +144,7 @@ function CameraModal({ onCapture, onClose }) {
           ) : (
             <video
               ref={videoRef}
+              onLoadedMetadata={() => setReady(true)}
               autoPlay
               playsInline
               muted
