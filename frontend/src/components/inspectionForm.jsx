@@ -28,43 +28,131 @@ function CameraModal({ onCapture, onClose }) {
       return;
     }
 
-    const initCamera = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false,
-        });
+    const waitForFirstFrame = (videoEl, timeout = 3000) => {
+      return new Promise((resolve, reject) => {
+        const start = Date.now();
 
-        if (!mounted) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
+        const done = () => {
+          if (
+            videoEl.readyState >= 2 &&
+            videoEl.videoWidth > 0 &&
+            videoEl.videoHeight > 0
+          ) {
+            resolve(true);
+            return true;
+          }
+          return false;
+        };
+
+        const tick = () => {
+          if (done()) return;
+          if (Date.now() - start >= timeout) {
+            reject(new Error("timeout"));
+            return;
+          }
+          requestAnimationFrame(tick);
+        };
+
+        if (typeof videoEl.requestVideoFrameCallback === "function") {
+          const id = videoEl.requestVideoFrameCallback(() => {
+            if (!done()) {
+              tick();
+            }
+          });
+
+          setTimeout(() => {
+            try {
+              videoEl.cancelVideoFrameCallback?.(id);
+            } catch {
+              // Ignorar fallback de cancelación no soportado.
+            }
+          }, timeout);
         }
 
-        streamRef.current = stream;
+        tick();
+      });
+    };
 
-        const videoEl = videoRef.current;
-        if (videoEl) {
+    const stopCurrentStream = () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+
+    const initCamera = async () => {
+      const videoEl = videoRef.current;
+      if (!videoEl) return;
+
+      // Safari/iOS necesita esta combinación para no abrir fullscreen ni dejar negro.
+      videoEl.setAttribute("playsinline", "true");
+      videoEl.setAttribute("webkit-playsinline", "true");
+
+      const cameraAttempts = [
+        { video: { facingMode: { exact: "environment" } }, audio: false },
+        {
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        },
+        { video: true, audio: false },
+        { video: { facingMode: "user" }, audio: false },
+      ];
+
+      let lastErr = null;
+
+      for (const constraints of cameraAttempts) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+          if (!mounted) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+
+          stopCurrentStream();
+          streamRef.current = stream;
           videoEl.srcObject = stream;
 
-          // En móvil (iOS/Android), forzar play evita vista negra tras conceder permiso.
-          await videoEl.play().catch(() => null);
+          await videoEl.play();
+          await waitForFirstFrame(videoEl);
+
+          if (!mounted) {
+            stopCurrentStream();
+            return;
+          }
+
+          setError(null);
+          setReady(true);
+          return;
+        } catch (err) {
+          lastErr = err;
+          stopCurrentStream();
         }
-      } catch (err) {
-        if (
-          err.name === "NotAllowedError" ||
-          err.name === "PermissionDeniedError"
-        ) {
-          setError(
-            "Permiso denegado. Permite el acceso a la cámara en la barra de dirección del navegador.",
-          );
-        } else if (
-          err.name === "NotFoundError" ||
-          err.name === "DevicesNotFoundError"
-        ) {
-          setError("No se encontró ninguna cámara en este dispositivo.");
-        } else {
-          setError("No se pudo acceder a la cámara: " + err.message);
-        }
+      }
+
+      if (
+        lastErr?.name === "NotAllowedError" ||
+        lastErr?.name === "PermissionDeniedError"
+      ) {
+        setError(
+          "Permiso denegado. Permite el acceso a la cámara en la barra de dirección del navegador.",
+        );
+      } else if (
+        lastErr?.name === "NotFoundError" ||
+        lastErr?.name === "DevicesNotFoundError"
+      ) {
+        setError("No se encontró ninguna cámara en este dispositivo.");
+      } else {
+        setError(
+          "No se pudo iniciar la vista previa de la cámara. Prueba a cerrar otras apps que usen la cámara e inténtalo de nuevo.",
+        );
       }
     };
 
@@ -144,7 +232,6 @@ function CameraModal({ onCapture, onClose }) {
           ) : (
             <video
               ref={videoRef}
-              onLoadedMetadata={() => setReady(true)}
               autoPlay
               playsInline
               muted
