@@ -97,6 +97,8 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 "inspeccion": inspeccion.id,
                 "descripcion": evidencia.descripcion,
                 "hash_sha256": evidencia.hash_sha256,
+                "tsa_applied": bool(evidencia.tsa_token),
+                "tsa_timestamp": evidencia.tsa_timestamp,
                 "foto": evidencia.foto.url if evidencia.foto else None,
                 "fecha_captura": evidencia.fecha_captura,
             },
