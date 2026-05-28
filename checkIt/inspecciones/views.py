@@ -8,6 +8,7 @@ from .models import Inspeccion
 from .serializers import InspeccionSerializer
 from .services.pdf_generator import generar_informe_base
 from .services.pdf_signer import firmar_pdf_reclamacion
+from .services.tsa import solicitar_sello_tiempo
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from django.shortcuts import get_object_or_404
@@ -78,11 +79,16 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        hash_sha256 = request.data.get('hash_sha256') or None
+        tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
+
         evidencia = Evidencia.objects.create(
             inspeccion=inspeccion,
             foto=foto,
             descripcion=request.data.get('descripcion') or '',
-            hash_sha256=request.data.get('hash_sha256') or None,
+            hash_sha256=hash_sha256,
+            tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
+            tsa_token=tsa_data.get('token') if tsa_data else None,
         )
 
         return Response(
