@@ -67,19 +67,42 @@ export default function AdminPage() {
   }, []);
 
   // ── Handlers inspecciones ─────────────────────────────────────────────────
+  const getDownloadFilename = (headers, fallbackName) => {
+    const contentDisposition =
+      headers?.["content-disposition"] || headers?.["Content-Disposition"];
+
+    if (!contentDisposition) return fallbackName;
+
+    const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match?.[1]) {
+      try {
+        return decodeURIComponent(utf8Match[1].replace(/"/g, "").trim());
+      } catch {
+        return utf8Match[1].replace(/"/g, "").trim();
+      }
+    }
+
+    const basicMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+    if (basicMatch?.[1]) {
+      return basicMatch[1].trim();
+    }
+
+    return fallbackName;
+  };
+
   const handleDownloadPDF = async (id) => {
     setDownloading(id);
     try {
-      const token = localStorage.getItem("access_token");
-      const response = await fetch(`/api/v1/inspecciones/${id}/claim-report/`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await api.get(`/inspecciones/${id}/claim-report/`, {
+        responseType: "blob",
       });
-      if (!response.ok) throw new Error("Sin permisos o informe no disponible");
-      const blob = await response.blob();
+      const blob = response.data;
+      const fallbackName = `Reclamacion_CheckIt_${id}.pdf`;
+      const filename = getDownloadFilename(response.headers, fallbackName);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `Reclamacion_CheckIt_${id}.pdf`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
