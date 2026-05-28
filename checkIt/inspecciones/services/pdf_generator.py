@@ -276,13 +276,13 @@ def generar_informe_base(inspeccion):
             try:
                 image_path = ev.foto.path
                 if image_path and os.path.exists(image_path):
-                    story.append(Image(image_path, width=9 * cm, height=6 * cm, kind='proportional'))
+                    story.append(Image(image_path, width=6 * cm, height=4.5 * cm, kind='proportional'))
                 else:
                     story.append(Paragraph('No se pudo cargar la foto en el informe (archivo no disponible).', s['small']))
             except Exception:
                 story.append(Paragraph('No se pudo cargar la foto en el informe (formato no compatible).', s['small']))
 
-            story.append(Spacer(1, 0.3 * cm))
+            story.append(Spacer(1, 0.4 * cm))
 
     # ── Integridad Criptográfica y Sello de Tiempo ───────────────────────────
     story.append(Spacer(1, 0.4 * cm))
