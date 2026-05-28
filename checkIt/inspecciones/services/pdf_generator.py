@@ -103,7 +103,7 @@ def generate_claim_pdf(inspection) -> bytes:
         author=inspection.property.organization.name,
     )
 
-    story = []
+    story: list = []
 
     # ── 1. Cabecera ──────────────────────────────────────────────────────────
     org_name = inspection.property.organization.name
@@ -161,7 +161,7 @@ def generate_claim_pdf(inspection) -> bytes:
         story.append(Paragraph('No se registraron evidencias en esta inspección.', s['value']))
     else:
         # Cabecera de la tabla
-        ev_header = [
+        ev_header: list[object] = [
             Paragraph('<b>Archivo</b>', s['small']),
             Paragraph('<b>Sala</b>', s['small']),
             Paragraph('<b>Descripción</b>', s['small']),
@@ -169,7 +169,7 @@ def generate_claim_pdf(inspection) -> bytes:
             Paragraph('<b>GPS</b>', s['small']),
             Paragraph('<b>Integridad</b>', s['small']),
         ]
-        ev_rows = [ev_header]
+        ev_rows: list[list[object]] = [ev_header]
 
         for ev in evidences:
             integrity_ok = bool(ev.sha256_server) and ev.sha256_client == ev.sha256_server
@@ -237,7 +237,7 @@ def generar_informe_base(inspeccion):
         topMargin=MARGIN, bottomMargin=MARGIN,
         title=f'Reclamación #{inspeccion.pk}',
     )
-    story = []
+    story: list = []
 
     story.append(Paragraph('INFORME DE RECLAMACIÓN DE DAÑOS', s['h1']))
     story.append(Paragraph(f'CheckIt  ·  RPT-{inspeccion.pk:06d}', s['label']))
@@ -266,8 +266,23 @@ def generar_informe_base(inspeccion):
     if not evidencias:
         story.append(Paragraph('No se registraron evidencias en esta inspección.', s['value']))
     else:
-        for ev in evidencias:
-            story.append(Paragraph(f'• {ev.descripcion or "Sin descripción"} — {ev.fecha_captura.strftime("%d/%m/%Y %H:%M")}', s['value']))
+        for idx, ev in enumerate(evidencias, start=1):
+            story.append(Paragraph(
+                f'<b>Evidencia #{idx}</b> · {ev.fecha_captura.strftime("%d/%m/%Y %H:%M")}',
+                s['value'],
+            ))
+            story.append(Paragraph(ev.descripcion or 'Sin descripción', s['small']))
+
+            try:
+                image_path = ev.foto.path
+                if image_path and os.path.exists(image_path):
+                    story.append(Image(image_path, width=9 * cm, height=6 * cm, kind='proportional'))
+                else:
+                    story.append(Paragraph('No se pudo cargar la foto en el informe (archivo no disponible).', s['small']))
+            except Exception:
+                story.append(Paragraph('No se pudo cargar la foto en el informe (formato no compatible).', s['small']))
+
+            story.append(Spacer(1, 0.3 * cm))
 
     # ── Integridad Criptográfica y Sello de Tiempo ───────────────────────────
     story.append(Spacer(1, 0.4 * cm))
