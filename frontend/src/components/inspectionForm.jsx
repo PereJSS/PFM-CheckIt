@@ -287,6 +287,13 @@ export default function InspectionForm({ inspectionId }) {
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const isMobileDevice =
+    typeof window !== "undefined" &&
+    (navigator.userAgentData?.mobile ||
+      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+      navigator.maxTouchPoints > 1);
 
   const processFile = async (file) => {
     setCameraOpen(false);
@@ -317,6 +324,24 @@ export default function InspectionForm({ inspectionId }) {
     }
   };
 
+  const openCamera = () => {
+    if (isMobileDevice && fileInputRef.current) {
+      fileInputRef.current.click();
+      return;
+    }
+
+    setCameraOpen(true);
+  };
+
+  const handleNativeCapture = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processFile(file);
+    }
+
+    e.target.value = "";
+  };
+
   const handleComplete = async () => {
     setStatus({ type: "loading", text: "Finalizando inspección…" });
     try {
@@ -334,6 +359,15 @@ export default function InspectionForm({ inspectionId }) {
 
   return (
     <>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleNativeCapture}
+      />
+
       {cameraOpen && (
         <CameraModal
           onCapture={processFile}
@@ -409,7 +443,7 @@ export default function InspectionForm({ inspectionId }) {
 
               {/* Botón cámara principal */}
               <button
-                onClick={() => setCameraOpen(true)}
+                onClick={openCamera}
                 className="flex flex-col items-center gap-3 p-6 rounded-xl border-2 border-dashed border-slate-300 hover:border-blue-400 hover:bg-blue-50 transition w-full"
               >
                 <svg
@@ -431,9 +465,15 @@ export default function InspectionForm({ inspectionId }) {
                     d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
                   />
                 </svg>
-                <span className="text-sm font-semibold text-slate-600">
-                  Abrir cámara
+                <span className="text-sm font-semibold text-slate-700">
+                  {isMobileDevice ? "Abrir cámara del móvil" : "Abrir cámara"}
                 </span>
+                {isMobileDevice && (
+                  <span className="text-xs text-slate-500 text-center">
+                    Se abrirá la app de cámara del dispositivo para que la foto
+                    se tome con vista previa nativa.
+                  </span>
+                )}
                 <span className="text-xs text-slate-400">
                   La foto se sellará con SHA-256 localmente
                 </span>
