@@ -7,7 +7,7 @@ djangorestframework-simplejwt==5.3.1
 reportlab==4.2.2
 pillow==10.4.0
 pyhanko==0.27.1
-psycopg2-binary==2.9.9
+psycopg[binary]==3.2.9
 PyJWT==2.9.0
 python-decouple==3.8
 rfc3161ng==2.1.3
