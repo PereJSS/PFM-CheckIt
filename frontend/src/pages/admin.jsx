@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
 
 const ESTADO = {
@@ -53,17 +53,44 @@ export default function AdminPage() {
   const [opErrors, setOpErrors] = useState({});
   const [opSaving, setOpSaving] = useState(false);
 
-  const loadAll = () => {
+  const loadAll = useCallback(() => {
     api
       .get("/inspecciones/")
       .then((res) => setInspections(res.data))
       .catch(() => setError("No se pudieron cargar las inspecciones."));
     api.get("/propiedades/").then((res) => setPropiedades(res.data));
     api.get("/usuarios/operarios/").then((res) => setOperarios(res.data));
-  };
+  }, []);
 
   useEffect(() => {
     loadAll();
+  }, [loadAll]);
+
+  useEffect(() => {
+    // Refresca automáticamente para ver estados/PDF nuevos sin recargar.
+    const refreshInspections = () => {
+      api
+        .get("/inspecciones/")
+        .then((res) => setInspections(res.data))
+        .catch(() => {});
+    };
+
+    const intervalId = window.setInterval(refreshInspections, 15000);
+    const onFocus = () => refreshInspections();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshInspections();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   // ── Handlers inspecciones ─────────────────────────────────────────────────
