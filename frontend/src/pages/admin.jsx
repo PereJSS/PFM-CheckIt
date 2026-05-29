@@ -108,7 +108,20 @@ export default function AdminPage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      alert("Error al descargar el informe: " + err.message);
+      let backendMessage = err.message;
+
+      const blob = err.response?.data;
+      if (blob instanceof Blob) {
+        try {
+          const text = await blob.text();
+          const json = JSON.parse(text);
+          backendMessage = json.error || json.detail || backendMessage;
+        } catch {
+          // Mantener mensaje por defecto si no es JSON.
+        }
+      }
+
+      alert("Error al descargar el informe: " + backendMessage);
     } finally {
       setDownloading(null);
     }

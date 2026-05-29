@@ -17,7 +17,12 @@ class User(AbstractUser):
     )
 
     def is_admin(self):
-        return self.role == self.Role.ADMIN
+        role = (self.role or "").strip().upper()
+        return (
+            role in {"ADMINISTRADOR", "ADMIN"}
+            or self.is_superuser
+            or self.is_staff
+        )
 
     def is_operator(self):
         return self.role == self.Role.OPERARIO
