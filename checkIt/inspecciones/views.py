@@ -15,6 +15,19 @@ from django.shortcuts import get_object_or_404
 from .models import Evidencia
 from django.http import HttpResponse
 
+
+def _is_admin_user(usuario):
+    # Robustez: admite roles legacy y flags de Django incluso si el método is_admin no existe.
+    if not getattr(usuario, "is_authenticated", False):
+        return False
+
+    role = str(getattr(usuario, "role", "") or "").strip().upper()
+    return (
+        role in {"ADMINISTRADOR", "ADMIN"}
+        or bool(getattr(usuario, "is_superuser", False))
+        or bool(getattr(usuario, "is_staff", False))
+    )
+
 class InspeccionViewSet(viewsets.ModelViewSet):
     queryset = Inspeccion.objects.all()
     serializer_class = InspeccionSerializer
@@ -22,7 +35,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     # Filtramos las inspecciones según el rol del usuario
     def get_queryset(self):
         usuario = self.request.user
-        if usuario.is_admin():
+        if _is_admin_user(usuario):
             return Inspeccion.objects.filter(propiedad__owner=usuario)
         return Inspeccion.objects.filter(operario=usuario)
 
@@ -30,15 +43,19 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='claim-report')
     def claim_report(self, request, pk=None):
         usuario = request.user
-        
-        # Seguridad: Solo los Property Managers (Admin) pueden descargar PDFs
-        if not usuario.is_admin():
+
+        # Seguridad: solo el admin propietario de la inspección puede descargar el informe.
+        inspeccion = get_object_or_404(Inspeccion, pk=pk)
+        can_download = (
+            _is_admin_user(usuario)
+            and inspeccion.propiedad.owner_id == usuario.id
+        )
+
+        if not can_download:
             return Response(
                 {"error": "No tienes permisos para descargar informes periciales."}, 
                 status=403
             )
-
-        inspeccion = self.get_object()
 
         
         # 1. Dibujamos el PDF
@@ -64,7 +81,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         # Solo el operario asignado o el admin dueño de la propiedad pueden adjuntar evidencia.
         can_upload = (
             (inspeccion.operario_id == usuario.id)
-            or (usuario.is_admin() and inspeccion.propiedad.owner_id == usuario.id)
+            or (_is_admin_user(usuario) and inspeccion.propiedad.owner_id == usuario.id)
         )
         if not can_upload:
             return Response(

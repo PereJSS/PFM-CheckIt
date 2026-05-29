@@ -2,6 +2,13 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../services/api";
 
+const isAdminRole = (role) => {
+  const normalized = String(role || "")
+    .trim()
+    .toUpperCase();
+  return normalized === "ADMINISTRADOR" || normalized === "ADMIN";
+};
+
 export default function Login() {
   const [credentials, setCredentials] = useState({
     username: "",
@@ -25,7 +32,7 @@ export default function Login() {
 
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;
-      window.location.href = role === "ADMINISTRADOR" ? "/" : "/operario";
+      window.location.href = isAdminRole(role) ? "/" : "/operario";
     } catch (err) {
       setError("Credenciales incorrectas. Inténtalo de nuevo.");
     } finally {

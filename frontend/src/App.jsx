@@ -1,15 +1,64 @@
+import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/login";
 import Register from "./pages/register";
 import AdminPage from "./pages/admin";
 import InspectionPage from "./pages/inspeccion";
+import api from "./services/api";
 
-// Componente para proteger las rutas privadas
-function ProtectedRoute({ children }) {
+function normalizeRole(role) {
+  return String(role || "")
+    .trim()
+    .toUpperCase();
+}
+
+// Protege rutas por JWT y por rol para evitar entrar a vistas no permitidas.
+function ProtectedRoute({ children, allowedRoles }) {
   const token = localStorage.getItem("access_token");
+  const [isLoading, setIsLoading] = useState(Boolean(token));
+  const [role, setRole] = useState(null);
+
+  const normalizedAllowed = useMemo(
+    () => (allowedRoles || []).map((r) => normalizeRole(r)),
+    [allowedRoles],
+  );
+
+  useEffect(() => {
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
+
+    api
+      .get("/auth/me/")
+      .then((res) => setRole(normalizeRole(res.data?.role)))
+      .catch(() => {
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("refresh_token");
+        setRole(null);
+      })
+      .finally(() => setIsLoading(false));
+  }, [token]);
+
   if (!token) {
     return <Navigate to="/login" replace />;
   }
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-500">
+        Validando sesión...
+      </div>
+    );
+  }
+
+  if (normalizedAllowed.length > 0 && !normalizedAllowed.includes(role)) {
+    if (role === "ADMINISTRADOR" || role === "ADMIN") {
+      return <Navigate to="/" replace />;
+    }
+    return <Navigate to="/operario" replace />;
+  }
+
   return children;
 }
 
@@ -25,7 +74,7 @@ export default function App() {
         <Route
           path="/operario"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedRoles={["OPERARIO"]}>
               <InspectionPage />
             </ProtectedRoute>
           }
@@ -35,7 +84,7 @@ export default function App() {
         <Route
           path="/"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedRoles={["ADMINISTRADOR", "ADMIN"]}>
               <AdminPage />
             </ProtectedRoute>
           }
