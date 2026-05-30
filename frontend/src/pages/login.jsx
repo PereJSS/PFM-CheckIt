@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../services/api";
+import { setAuthTokens } from "../services/authStorage";
 
 const isAdminRole = (role) => {
   const normalized = String(role || "")
@@ -27,8 +28,10 @@ export default function Login() {
     setError(null);
     try {
       const response = await api.post("/auth/login/", credentials);
-      localStorage.setItem("access_token", response.data.access);
-      localStorage.setItem("refresh_token", response.data.refresh);
+      setAuthTokens({
+        accessToken: response.data.access,
+        refreshToken: response.data.refresh,
+      });
 
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;

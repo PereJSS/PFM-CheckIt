@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
+import { clearAuthTokens } from "../services/authStorage";
 
 const ESTADO = {
   COMPLETADA: {
@@ -155,8 +156,7 @@ export default function AdminPage() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
+    clearAuthTokens();
     window.location.href = "/login";
   };
 

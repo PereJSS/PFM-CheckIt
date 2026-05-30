@@ -5,6 +5,7 @@ import Register from "./pages/register";
 import AdminPage from "./pages/admin";
 import InspectionPage from "./pages/inspeccion";
 import api from "./services/api";
+import { clearAuthTokens, getAccessToken } from "./services/authStorage";
 
 function normalizeRole(role) {
   return String(role || "")
@@ -14,7 +15,7 @@ function normalizeRole(role) {
 
 // Protege rutas por JWT y por rol para evitar entrar a vistas no permitidas.
 function ProtectedRoute({ children, allowedRoles }) {
-  const token = localStorage.getItem("access_token");
+  const token = getAccessToken();
   const [isLoading, setIsLoading] = useState(Boolean(token));
   const [role, setRole] = useState(null);
 
@@ -33,8 +34,7 @@ function ProtectedRoute({ children, allowedRoles }) {
       .get("/auth/me/")
       .then((res) => setRole(normalizeRole(res.data?.role)))
       .catch(() => {
-        localStorage.removeItem("access_token");
-        localStorage.removeItem("refresh_token");
+        clearAuthTokens();
         setRole(null);
       })
       .finally(() => setIsLoading(false));

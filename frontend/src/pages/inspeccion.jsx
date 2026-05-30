@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import InspectionForm from "../components/inspectionForm";
 import api from "../services/api";
 import { syncPendingEvidences } from "../services/offline";
+import { clearAuthTokens } from "../services/authStorage";
 
 const ESTADO_BADGE = {
   PENDIENTE: "bg-slate-100 text-slate-600 ring-slate-200",
@@ -90,8 +91,7 @@ export default function InspectionPage() {
           </span>
           <button
             onClick={() => {
-              localStorage.removeItem("access_token");
-              localStorage.removeItem("refresh_token");
+              clearAuthTokens();
               window.location.href = "/login";
             }}
             className="text-sm text-slate-500 hover:text-slate-800 transition font-medium"

@@ -2,6 +2,12 @@
 //  La baseURL se establece en "/api/v1", lo que significa que todas las solicitudes realizadas con esta instancia de axios se dirigirán a esa ruta base.
 
 import axios from "axios";
+import {
+  clearAuthTokens,
+  getAccessToken,
+  getRefreshToken,
+  setAccessToken,
+} from "./authStorage";
 
 const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
 
@@ -11,7 +17,7 @@ const api = axios.create({
 
 // Interceptor de petición: adjunta el token JWT en cada petición
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("access_token");
+  const token = getAccessToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -27,25 +33,24 @@ api.interceptors.response.use(
     // Solo intentar renovar una vez y solo ante 401
     if (error.response?.status === 401 && !original._retry) {
       original._retry = true;
-      const refreshToken = localStorage.getItem("refresh_token");
+      const refreshToken = getRefreshToken();
 
       if (refreshToken) {
         try {
           const { data } = await axios.post(`${apiBaseUrl}/auth/refresh/`, {
             refresh: refreshToken,
           });
-          localStorage.setItem("access_token", data.access);
+          setAccessToken(data.access);
           original.headers.Authorization = `Bearer ${data.access}`;
           return api(original);
         } catch {
           // Refresh fallido: limpiar sesión y redirigir al login
-          localStorage.removeItem("access_token");
-          localStorage.removeItem("refresh_token");
+          clearAuthTokens();
           window.location.href = "/login";
         }
       } else {
         // Sin refresh token: redirigir al login
-        localStorage.removeItem("access_token");
+        clearAuthTokens();
         window.location.href = "/login";
       }
     }
