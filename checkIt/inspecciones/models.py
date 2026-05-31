@@ -18,8 +18,12 @@ class Inspeccion(models.Model):
     fecha_creacion = models.DateTimeField(auto_now_add=True)
     estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
 
-    def __str__(self):
-        return f"Inspección {self.id} - {self.propiedad.nombre} asignada a {self.operario.username if self.operario else 'Sin operario'} - Estado: {self.get_estado_display()}"
+    def __str__(self) -> str:
+        return f"Inspección {self.pk} - {self.propiedad.nombre} asignada a {self.operario.username if self.operario else 'Sin operario'} - Estado: {self.estado_display()}"
+
+    def estado_display(self) -> str:
+        estados = {str(valor): etiqueta for valor, etiqueta in self.Estado.choices}
+        return estados.get(self.estado, self.estado)
 
 # Modelo para almacenar evidencias (fotos) de las inspecciones
 class Evidencia(models.Model):

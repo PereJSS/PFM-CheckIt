@@ -16,14 +16,18 @@ const ROOMS = [
 ];
 
 // ── Visor de cámara en vivo ────────────────────────────────────────────────
+// Modal responsable de abrir cámara, mostrar preview y devolver una foto capturada.
 function CameraModal({ onCapture, onClose }) {
+  // Referencias a elementos de DOM para flujo de captura en tiempo real.
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  // ready controla cuándo puede dispararse la foto; error muestra fallback de UI.
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    // mounted evita actualizar estado si el modal se desmonta durante tareas async.
     let mounted = true;
 
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -31,6 +35,7 @@ function CameraModal({ onCapture, onClose }) {
       return;
     }
 
+    // Espera a que el video reciba un frame real para evitar capturas negras.
     const waitForFirstFrame = (videoEl, timeout = 3000) => {
       return new Promise((resolve, reject) => {
         const start = Date.now();
@@ -76,6 +81,7 @@ function CameraModal({ onCapture, onClose }) {
       });
     };
 
+    // Cierra el stream activo y limpia el video antes de reintentar.
     const stopCurrentStream = () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
@@ -86,6 +92,7 @@ function CameraModal({ onCapture, onClose }) {
       }
     };
 
+    // Intenta varias configuraciones de cámara para maximizar compatibilidad.
     const initCamera = async () => {
       const videoEl = videoRef.current;
       if (!videoEl) return;
@@ -110,6 +117,7 @@ function CameraModal({ onCapture, onClose }) {
 
       let lastErr = null;
 
+      // Se prueban constraints de más específicos a más genéricos.
       for (const constraints of cameraAttempts) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -135,6 +143,7 @@ function CameraModal({ onCapture, onClose }) {
           setReady(true);
           return;
         } catch (err) {
+          // Guarda último error para reportar un mensaje útil al usuario.
           lastErr = err;
           stopCurrentStream();
         }
@@ -161,6 +170,7 @@ function CameraModal({ onCapture, onClose }) {
 
     initCamera();
 
+    // Limpieza al cerrar modal: corta cámara y suelta recursos del navegador.
     return () => {
       mounted = false;
       setReady(false);
@@ -175,6 +185,7 @@ function CameraModal({ onCapture, onClose }) {
     };
   }, []);
 
+  // Captura el frame actual del video, lo convierte a Blob y lo devuelve como File.
   const handleShoot = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -194,6 +205,7 @@ function CameraModal({ onCapture, onClose }) {
     );
   }, [onCapture]);
 
+  // Fallback de carga manual cuando la cámara no puede abrirse.
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) onCapture(file);
@@ -285,19 +297,23 @@ function CameraModal({ onCapture, onClose }) {
 
 // ── Formulario principal ───────────────────────────────────────────────────
 export default function InspectionForm({ inspectionId }) {
+  // Estado del flujo en 2 pasos: elegir estancia y registrar evidencia.
   const [step, setStep] = useState(1);
   const [room, setRoom] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  // Input oculto para abrir cámara nativa en móvil.
   const fileInputRef = useRef(null);
 
+  // Detección heurística de móvil para elegir cámara nativa vs modal web.
   const isMobileDevice =
     typeof window !== "undefined" &&
     (navigator.userAgentData?.mobile ||
       /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
       navigator.maxTouchPoints > 1);
 
+  // Procesa archivo: calcula hash, intenta subir online y si falla guarda offline.
   const processFile = async (file) => {
     setCameraOpen(false);
     setStatus({ type: "loading", text: "Calculando huella SHA-256…" });
@@ -311,6 +327,7 @@ export default function InspectionForm({ inspectionId }) {
     }
 
     try {
+      // Hash local para trazabilidad e integridad de la evidencia.
       const hash = await calculateSHA256(file);
 
       const formData = new FormData();
@@ -352,6 +369,7 @@ export default function InspectionForm({ inspectionId }) {
     }
   };
 
+  // En móvil abre la captura nativa; en desktop abre modal con preview en vivo.
   const openCamera = () => {
     if (isMobileDevice && fileInputRef.current) {
       fileInputRef.current.click();
@@ -361,6 +379,7 @@ export default function InspectionForm({ inspectionId }) {
     setCameraOpen(true);
   };
 
+  // Recibe la imagen tomada por la cámara nativa y reinicia el input.
   const handleNativeCapture = (e) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -370,6 +389,7 @@ export default function InspectionForm({ inspectionId }) {
     e.target.value = "";
   };
 
+  // Solo permite finalizar si no quedan evidencias offline pendientes de sincronizar.
   const handleComplete = async () => {
     const pending = await getPendingEvidencesByInspection(inspectionId);
     if (pending.length > 0) {
@@ -396,6 +416,7 @@ export default function InspectionForm({ inspectionId }) {
 
   return (
     <>
+      {/* Input oculto usado para invocar la cámara nativa del dispositivo. */}
       <input
         ref={fileInputRef}
         type="file"
@@ -405,6 +426,7 @@ export default function InspectionForm({ inspectionId }) {
         onChange={handleNativeCapture}
       />
 
+      {/* Modal de cámara web (solo desktop/no-móvil). */}
       {cameraOpen && (
         <CameraModal
           onCapture={processFile}
@@ -412,6 +434,7 @@ export default function InspectionForm({ inspectionId }) {
         />
       )}
 
+      {/* Tarjeta principal del flujo de inspección. */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         {/* Barra de progreso */}
         <div className="flex border-b border-slate-100">
@@ -424,6 +447,7 @@ export default function InspectionForm({ inspectionId }) {
         </div>
 
         <div className="p-6">
+          {/* Paso 1: seleccionar estancia y/o finalizar inspección. */}
           {step === 1 && (
             <div className="flex flex-col gap-5">
               <div>
@@ -463,6 +487,7 @@ export default function InspectionForm({ inspectionId }) {
             </div>
           )}
 
+          {/* Paso 2: describir daño y capturar/subir evidencia fotográfica. */}
           {step === 2 && (
             <div className="flex flex-col gap-5">
               <div>
@@ -525,6 +550,7 @@ export default function InspectionForm({ inspectionId }) {
             </div>
           )}
 
+          {/* Mensajes de estado del flujo: éxito, error o información. */}
           {status && (
             <div
               className={`mt-5 px-4 py-3 rounded-lg text-sm font-medium ${

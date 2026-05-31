@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
+from typing import cast
 from .models import User
 from .serializers import AdminRegisterSerializer, OperarioCreateSerializer
 
@@ -13,7 +14,7 @@ class RegisterAdminView(APIView):
     def post(self, request):
         serializer = AdminRegisterSerializer(data=request.data)
         if serializer.is_valid():
-            user = serializer.save()
+            user = cast(User, serializer.save())
             return Response(
                 {"detail": "Cuenta creada correctamente.", "username": user.username},
                 status=status.HTTP_201_CREATED,
@@ -27,7 +28,7 @@ class MeView(APIView):
     def get(self, request):
         user = request.user
         return Response({
-            "id": user.id,
+            "id": user.pk,
             "username": user.username,
             "email": user.email,
             "role": user.role,
@@ -44,7 +45,7 @@ class OperariosView(APIView):
         operarios = User.objects.filter(role=User.Role.OPERARIO).order_by("first_name", "username")
         data = [
             {
-                "id": u.id,
+                "id": u.pk,
                 "username": u.username,
                 "email": u.email,
                 "nombre": u.get_full_name() or u.username,
@@ -58,9 +59,9 @@ class OperariosView(APIView):
             return Response({"error": "Sin permisos."}, status=403)
         serializer = OperarioCreateSerializer(data=request.data)
         if serializer.is_valid():
-            user = serializer.save()
+            user = cast(User, serializer.save())
             return Response(
-                {"id": user.id, "username": user.username, "nombre": user.get_full_name() or user.username},
+                {"id": user.pk, "username": user.username, "nombre": user.get_full_name() or user.username},
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

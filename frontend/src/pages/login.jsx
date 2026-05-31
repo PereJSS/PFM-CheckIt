@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import api from "../services/api";
 import { setAuthTokens } from "../services/authStorage";
 
+// Acepta roles legacy para evitar fallos de redirección por variantes de nombre.
 const isAdminRole = (role) => {
   const normalized = String(role || "")
     .trim()
@@ -11,6 +12,7 @@ const isAdminRole = (role) => {
 };
 
 export default function Login() {
+  // Estado del formulario de acceso y flags de UX.
   const [credentials, setCredentials] = useState({
     username: "",
     password: "",
@@ -18,25 +20,30 @@ export default function Login() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // Actualiza campo por nombre para reutilizar handler en ambos inputs.
   const handleChange = (e) => {
     setCredentials({ ...credentials, [e.target.name]: e.target.value });
   };
 
+  // Login en dos pasos: obtener tokens y luego consultar perfil para decidir ruta.
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
+      // 1) Solicita JWT al backend y persiste tokens para futuras llamadas.
       const response = await api.post("/auth/login/", credentials);
       setAuthTokens({
         accessToken: response.data.access,
         refreshToken: response.data.refresh,
       });
 
+      // 2) Carga el usuario autenticado para enrutar según rol.
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;
       window.location.href = isAdminRole(role) ? "/" : "/operario";
     } catch (err) {
+      // Mensaje genérico para no filtrar detalles de autenticación.
       setError("Credenciales incorrectas. Inténtalo de nuevo.");
     } finally {
       setLoading(false);
@@ -69,6 +76,7 @@ export default function Login() {
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div>
+              {/* Campo de usuario */}
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
                 Usuario
               </label>
@@ -83,6 +91,7 @@ export default function Login() {
             </div>
 
             <div>
+              {/* Campo de contraseña */}
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
                 Contraseña
               </label>
@@ -96,6 +105,7 @@ export default function Login() {
               />
             </div>
 
+            {/* Botón bloqueado mientras la petición de login está en curso. */}
             <button
               type="submit"
               disabled={loading}

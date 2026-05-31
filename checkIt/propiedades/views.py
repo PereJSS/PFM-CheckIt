@@ -8,7 +8,7 @@ class PropiedadViewSet(viewsets.ModelViewSet):
     serializer_class = PropiedadSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
+    def get_queryset(self):  # type: ignore[override]
         return Propiedad.objects.filter(owner=self.request.user).order_by('nombre')
 
     def perform_create(self, serializer):

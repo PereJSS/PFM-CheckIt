@@ -4,6 +4,7 @@ import api from "../services/api";
 import { syncPendingEvidences } from "../services/offline";
 import { clearAuthTokens } from "../services/authStorage";
 
+// Diccionarios para mostrar estado con etiqueta legible y estilo visual consistente.
 const ESTADO_BADGE = {
   PENDIENTE: "bg-slate-100 text-slate-600 ring-slate-200",
   EN_PROGRESO: "bg-amber-50 text-amber-700 ring-amber-200",
@@ -16,12 +17,14 @@ const ESTADO_LABEL = {
 };
 
 export default function InspectionPage() {
+  // Estado principal de la pantalla del operario.
   const [inspecciones, setInspecciones] = useState([]);
   const [seleccionada, setSeleccionada] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [syncInfo, setSyncInfo] = useState(null);
 
+  // Carga el listado de inspecciones asignadas al operario autenticado.
   const cargar = () =>
     api
       .get("/inspecciones/")
@@ -30,12 +33,15 @@ export default function InspectionPage() {
       .finally(() => setLoading(false));
 
   useEffect(() => {
+    // Hidratación inicial de datos al entrar en la página.
     cargar();
 
+    // Si hay conexión, intenta subir automáticamente evidencias guardadas offline.
     const syncOfflineNow = async () => {
       if (!navigator.onLine) return;
 
       const result = await syncPendingEvidences(async (evidence) => {
+        // Reconstruye payload multipart igual que una subida normal online.
         const formData = new FormData();
         const fallbackName = `evidencia_${Date.now()}.jpg`;
 
@@ -60,6 +66,7 @@ export default function InspectionPage() {
       });
 
       if (result.syncedCount > 0) {
+        // Tras sincronizar, refresca para reflejar estado/contador actualizado.
         setSyncInfo(
           `Se sincronizaron ${result.syncedCount} evidencias pendientes.`,
         );
@@ -67,14 +74,17 @@ export default function InspectionPage() {
       }
     };
 
+    // Reintenta sincronización al recuperar conectividad del dispositivo.
     syncOfflineNow();
     window.addEventListener("online", syncOfflineNow);
 
+    // Limpieza del listener al desmontar la página.
     return () => {
       window.removeEventListener("online", syncOfflineNow);
     };
   }, []);
 
+  // Solo se muestran inspecciones en curso o pendientes de completar.
   const activas = inspecciones.filter(
     (i) => i.estado === "PENDIENTE" || i.estado === "EN_PROGRESO",
   );
@@ -91,6 +101,7 @@ export default function InspectionPage() {
           </span>
           <button
             onClick={() => {
+              // Logout local simple para SPA: limpia tokens y redirige.
               clearAuthTokens();
               window.location.href = "/login";
             }}
@@ -102,6 +113,7 @@ export default function InspectionPage() {
       </header>
 
       <main className="max-w-lg mx-auto px-4 py-10">
+        {/* Mensajes de sincronización y estado de carga/errores. */}
         {syncInfo && (
           <p className="mb-3 text-sm text-emerald-700">{syncInfo}</p>
         )}
@@ -126,6 +138,7 @@ export default function InspectionPage() {
                   </div>
                   <button
                     onClick={() => {
+                      // Al volver, recarga para ver cambios hechos dentro del formulario.
                       setSeleccionada(null);
                       cargar();
                     }}
@@ -153,6 +166,7 @@ export default function InspectionPage() {
                     No tienes inspecciones pendientes asignadas.
                   </p>
                 ) : (
+                  // Cada tarjeta abre el formulario de captura para esa inspección.
                   <ul className="space-y-3">
                     {activas.map((insp) => (
                       <li key={insp.id}>

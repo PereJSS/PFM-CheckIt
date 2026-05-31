@@ -16,6 +16,8 @@ from rest_framework.permissions import AllowAny
 from django.shortcuts import get_object_or_404
 from .models import Evidencia
 from django.http import HttpResponse
+from django.db.models import QuerySet
+from typing import cast
 
 
 MAX_EVIDENCE_SIZE_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -88,16 +90,19 @@ def _can_access_evidence(usuario, evidencia):
 
     inspeccion = evidencia.inspeccion
     return (
-        inspeccion.operario_id == usuario.id
-        or (_is_admin_user(usuario) and inspeccion.propiedad.owner_id == usuario.id)
+        inspeccion.operario_id == usuario.pk
+        or (
+            _is_admin_user(usuario)
+            and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
+        )
     )
 
 class InspeccionViewSet(viewsets.ModelViewSet):
-    queryset = Inspeccion.objects.all()
+    queryset: QuerySet[Inspeccion] = cast(QuerySet[Inspeccion], Inspeccion.objects.all())
     serializer_class = InspeccionSerializer
 
     # Filtramos las inspecciones según el rol del usuario
-    def get_queryset(self):
+    def get_queryset(self):  # type: ignore[override]
         usuario = self.request.user
         if _is_admin_user(usuario):
             return Inspeccion.objects.filter(propiedad__owner=usuario)
@@ -117,7 +122,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         propiedad = serializer.validated_data.get('propiedad')
         operario = serializer.validated_data.get('operario')
 
-        if not propiedad or propiedad.owner_id != usuario.id:
+        if not propiedad or getattr(propiedad.owner, 'pk', None) != usuario.pk:
             return Response(
                 {"error": "Solo puedes crear inspecciones sobre tus propiedades."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -138,14 +143,14 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         usuario = request.user
 
         if _is_admin_user(usuario):
-            if inspeccion.propiedad.owner_id != usuario.id:
+            if getattr(inspeccion.propiedad.owner, 'pk', None) != usuario.pk:
                 return Response({"error": "Sin permisos."}, status=status.HTTP_403_FORBIDDEN)
 
             serializer = self.get_serializer(inspeccion, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
 
             nueva_propiedad = serializer.validated_data.get('propiedad')
-            if nueva_propiedad and nueva_propiedad.owner_id != usuario.id:
+            if nueva_propiedad and getattr(nueva_propiedad.owner, 'pk', None) != usuario.pk:
                 return Response(
                     {"error": "Solo puedes mover inspecciones a tus propias propiedades."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -162,7 +167,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
         # Operario: solo puede marcar su inspección asignada como COMPLETADA.
-        if inspeccion.operario_id != usuario.id:
+        if inspeccion.operario_id != usuario.pk:
             return Response({"error": "Sin permisos."}, status=status.HTTP_403_FORBIDDEN)
 
         requested_fields = set(request.data.keys())
@@ -191,7 +196,10 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         inspeccion = self.get_object()
         usuario = request.user
-        if not (_is_admin_user(usuario) and inspeccion.propiedad.owner_id == usuario.id):
+        if not (
+            _is_admin_user(usuario)
+            and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
+        ):
             return Response({"error": "Solo el administrador propietario puede eliminar inspecciones."}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
@@ -204,7 +212,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         inspeccion = get_object_or_404(Inspeccion, pk=pk)
         can_download = (
             _is_admin_user(usuario)
-            and inspeccion.propiedad.owner_id == usuario.id
+            and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
         )
 
         if not can_download:
@@ -218,14 +226,14 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         input_pdf = generar_informe_base(inspeccion)
         
         # 2. Aplicamos la firma criptográfica X.509
-        ruta_final = f"tmp/Reclamacion_Fianza_{inspeccion.id}_Firmada.pdf"
+        ruta_final = f"tmp/Reclamacion_Fianza_{inspeccion.pk}_Firmada.pdf"
         signed_pdf = firmar_pdf_reclamacion(input_pdf, ruta_final)
         
         # 3. Devolvemos el archivo binario al navegador para su descarga
         return FileResponse(
             open(signed_pdf, 'rb'), 
             as_attachment=True, 
-            filename=f"Reclamacion_CheckIt_{inspeccion.id}.pdf"
+            filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf"
         )
 
     @action(detail=True, methods=['post'], url_path='evidencias')
@@ -236,8 +244,11 @@ class InspeccionViewSet(viewsets.ModelViewSet):
 
         # Solo el operario asignado o el admin dueño de la propiedad pueden adjuntar evidencia.
         can_upload = (
-            (inspeccion.operario_id == usuario.id)
-            or (_is_admin_user(usuario) and inspeccion.propiedad.owner_id == usuario.id)
+            (inspeccion.operario_id == usuario.pk)
+            or (
+                _is_admin_user(usuario)
+                and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
+            )
         )
         if not can_upload:
             return Response(
@@ -267,13 +278,13 @@ class InspeccionViewSet(viewsets.ModelViewSet):
 
         return Response(
             {
-                "id": evidencia.id,
-                "inspeccion": inspeccion.id,
+                "id": evidencia.pk,
+                "inspeccion": inspeccion.pk,
                 "descripcion": evidencia.descripcion,
                 "hash_sha256": evidencia.hash_sha256,
                 "tsa_applied": bool(evidencia.tsa_token),
                 "tsa_timestamp": evidencia.tsa_timestamp,
-                "audit_token": _build_audit_token(evidencia.id),
+                "audit_token": _build_audit_token(evidencia.pk),
                 "foto": evidencia.foto.url if evidencia.foto else None,
                 "fecha_captura": evidencia.fecha_captura,
             },
@@ -287,17 +298,17 @@ class EvidenceAuditView(APIView):
 
     def get(self, request, id):
         """ GET /api/v1/audit/{id}/ """
-        evidencia = get_object_or_404(Evidencia, id=id)
+        evidencia = get_object_or_404(Evidencia, pk=id)
 
         token = request.query_params.get('t')
-        token_ok = _token_matches_evidence(token, evidencia.id)
+        token_ok = _token_matches_evidence(token, evidencia.pk)
         user_ok = _can_access_evidence(request.user, evidencia)
 
         if not (token_ok or user_ok):
             return Response({"error": "Sin permisos para consultar esta evidencia."}, status=status.HTTP_403_FORBIDDEN)
 
         return Response({
-            "evidencia_id": evidencia.id,
+            "evidencia_id": evidencia.pk,
             "hash_sha256": evidencia.hash_sha256,
             "tsa_timestamp": evidencia.tsa_timestamp,
             "mensaje": "Integridad matemática verificada correctamente."
@@ -308,10 +319,10 @@ class EvidenceTokenView(APIView):
 
     def get(self, request, id):
         """ GET /api/v1/audit/{id}/token/ """
-        evidencia = get_object_or_404(Evidencia, id=id)
+        evidencia = get_object_or_404(Evidencia, pk=id)
 
         token = request.query_params.get('t')
-        token_ok = _token_matches_evidence(token, evidencia.id)
+        token_ok = _token_matches_evidence(token, evidencia.pk)
         user_ok = _can_access_evidence(request.user, evidencia)
 
         if not (token_ok or user_ok):
@@ -322,5 +333,5 @@ class EvidenceTokenView(APIView):
         
         # Devuelve el archivo binario .tsr para su validación manual [5]
         response = HttpResponse(evidencia.tsa_token, content_type='application/timestamp-reply')
-        response['Content-Disposition'] = f'attachment; filename="evidencia_{evidencia.id}_token.tsr"'
+        response['Content-Disposition'] = f'attachment; filename="evidencia_{evidencia.pk}_token.tsr"'
         return response

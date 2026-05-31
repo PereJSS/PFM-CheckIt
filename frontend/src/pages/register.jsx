@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../services/api";
 
+// Estado inicial reutilizable para limpiar/formatear el formulario de alta.
 const FORM_EMPTY = {
   username: "",
   email: "",
@@ -13,16 +14,19 @@ const FORM_EMPTY = {
 
 export default function Register() {
   const navigate = useNavigate();
+  // Estado de formulario y UX (errores, carga y éxito de registro).
   const [form, setForm] = useState(FORM_EMPTY);
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
+  // Actualiza el campo editado y limpia su error puntual para feedback inmediato.
   const handleChange = (e) => {
     setForm({ ...form, [e.target.name]: e.target.value });
     setErrors((prev) => ({ ...prev, [e.target.name]: undefined }));
   };
 
+  // Envía registro de admin y maneja errores de validación campo a campo.
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -30,11 +34,14 @@ export default function Register() {
     try {
       await api.post("/auth/register/", form);
       setSuccess(true);
+      // Redirige tras breve confirmación visual de cuenta creada.
       setTimeout(() => navigate("/login"), 2000);
     } catch (err) {
       if (err.response?.data) {
+        // El backend devuelve errores por campo compatibles con la UI.
         setErrors(err.response.data);
       } else {
+        // Fallback para cortes de red o errores no estructurados.
         setErrors({
           non_field_errors: "Error de conexión. Inténtalo de nuevo.",
         });
@@ -44,11 +51,13 @@ export default function Register() {
     }
   };
 
+  // Helper para renderizar mensajes de error debajo de cada input.
   const fieldError = (field) =>
     errors[field] ? (
       <p className="mt-1 text-xs text-red-600">{errors[field]}</p>
     ) : null;
 
+  // Estado post-registro: pantalla breve de éxito antes de navegar a login.
   if (success) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
@@ -97,6 +106,7 @@ export default function Register() {
             Crear cuenta de administrador
           </h1>
 
+          {/* Formulario principal de alta con validaciones obligatorias mínimas. */}
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Nombre y apellidos */}
             <div className="grid grid-cols-2 gap-3">

@@ -11,10 +11,10 @@ class AdminRegisterSerializer(serializers.ModelSerializer):
         model = User
         fields = ('username', 'email', 'first_name', 'last_name', 'password', 'password2')
 
-    def validate(self, data):
-        if data['password'] != data['password2']:
+    def validate(self, attrs):
+        if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({'password2': 'Las contraseñas no coinciden.'})
-        return data
+        return attrs
 
     def create(self, validated_data):
         validated_data.pop('password2')

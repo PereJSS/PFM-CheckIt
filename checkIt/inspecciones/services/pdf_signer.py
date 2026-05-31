@@ -18,6 +18,10 @@ def firmar_pdf_reclamacion(input_path, output_path):
 
     # Cargamos el certificado y la clave privada
     signer = signers.SimpleSigner.load(key_path, cert_path)
+    if signer is None:
+        raise RuntimeError(
+            'No se pudo cargar el firmante PDF. Revisa PDF_SIGNING_KEY_PATH y PDF_SIGNING_CERT_PATH.'
+        )
 
     # Estilo de sello visual: texto con firmante y fecha visible en el PDF
     stamp_style = stamp.TextStampStyle(

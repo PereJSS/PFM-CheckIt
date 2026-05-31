@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
 import { clearAuthTokens } from "../services/authStorage";
 
+// Catálogo de estilos/etiquetas para pintar el estado de cada inspección en tabla.
 const ESTADO = {
   COMPLETADA: {
     label: "Completada",
@@ -17,6 +18,7 @@ const ESTADO = {
   },
 };
 
+// Valores iniciales para resetear formularios sin repetir objetos literales.
 const FORM_EMPTY = { propiedad: "", operario: "" };
 const PROP_EMPTY = { nombre: "", direccion: "", descripcion: "" };
 const OP_EMPTY = {
@@ -28,6 +30,7 @@ const OP_EMPTY = {
 };
 
 export default function AdminPage() {
+  // Tab activa del panel de administración.
   const [tab, setTab] = useState("inspecciones");
 
   // ── Inspecciones ──────────────────────────────────────────────────────────
@@ -54,6 +57,7 @@ export default function AdminPage() {
   const [opErrors, setOpErrors] = useState({});
   const [opSaving, setOpSaving] = useState(false);
 
+  // Carga inicial de todas las entidades necesarias para el dashboard.
   const loadAll = useCallback(() => {
     api
       .get("/inspecciones/")
@@ -64,6 +68,7 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
+    // Primera hidratación de datos al montar la pantalla.
     loadAll();
   }, [loadAll]);
 
@@ -95,6 +100,7 @@ export default function AdminPage() {
   }, []);
 
   // ── Handlers inspecciones ─────────────────────────────────────────────────
+  // Extrae nombre de archivo desde Content-Disposition (incluyendo UTF-8).
   const getDownloadFilename = (headers, fallbackName) => {
     const contentDisposition =
       headers?.["content-disposition"] || headers?.["Content-Disposition"];
@@ -118,6 +124,7 @@ export default function AdminPage() {
     return fallbackName;
   };
 
+  // Solicita al backend el PDF firmado y fuerza descarga en navegador.
   const handleDownloadPDF = async (id) => {
     setDownloading(id);
     try {
@@ -136,6 +143,7 @@ export default function AdminPage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
+      // Intenta leer el blob de error para mostrar mensaje útil del backend.
       let backendMessage = err.message;
 
       const blob = err.response?.data;
@@ -155,11 +163,13 @@ export default function AdminPage() {
     }
   };
 
+  // Cierre de sesión local: limpia tokens y redirige a login.
   const handleLogout = () => {
     clearAuthTokens();
     window.location.href = "/login";
   };
 
+  // Crea una inspección asignando propiedad + operario seleccionados.
   const handleSubmit = async (e) => {
     e.preventDefault();
     setFormError(null);
@@ -185,6 +195,7 @@ export default function AdminPage() {
   };
 
   // ── Handlers propiedades ──────────────────────────────────────────────────
+  // Abre formulario en modo alta y limpia estado previo.
   const openNewProp = () => {
     setEditingProp(null);
     setPropForm(PROP_EMPTY);
@@ -192,6 +203,7 @@ export default function AdminPage() {
     setShowPropForm(true);
   };
 
+  // Abre formulario en modo edición precargando datos de la propiedad.
   const openEditProp = (p) => {
     setEditingProp(p.id);
     setPropForm({
@@ -203,6 +215,7 @@ export default function AdminPage() {
     setShowPropForm(true);
   };
 
+  // Alta/edición de propiedades según exista editingProp.
   const handlePropSubmit = async (e) => {
     e.preventDefault();
     setPropErrors({});
@@ -226,6 +239,7 @@ export default function AdminPage() {
     }
   };
 
+  // Elimina propiedad tras confirmación y recarga el listado.
   const handleDeleteProp = async (id) => {
     if (!window.confirm("¿Eliminar esta propiedad?")) return;
     await api.delete(`/propiedades/${id}/`);
@@ -233,6 +247,7 @@ export default function AdminPage() {
   };
 
   // ── Handlers operarios ────────────────────────────────────────────────────
+  // Crea un operario y refresca la tabla.
   const handleOpSubmit = async (e) => {
     e.preventDefault();
     setOpErrors({});
@@ -253,12 +268,14 @@ export default function AdminPage() {
     }
   };
 
+  // Elimina operario tras confirmación y recarga listado.
   const handleDeleteOp = async (id) => {
     if (!window.confirm("¿Eliminar este operario?")) return;
     await api.delete(`/usuarios/operarios/${id}/`);
     api.get("/usuarios/operarios/").then((res) => setOperarios(res.data));
   };
 
+  // Render helper para errores por campo en formularios.
   const fieldErr = (errs, field) =>
     errs[field] ? (
       <p className="mt-1 text-xs text-red-600">{errs[field]}</p>
@@ -287,6 +304,7 @@ export default function AdminPage() {
 
       <main className="max-w-6xl mx-auto px-6 py-10">
         {/* Pestañas */}
+        {/* Navegación principal entre módulos del panel. */}
         <nav className="flex gap-1 mb-8 border-b border-slate-200">
           {[
             { id: "inspecciones", label: "Inspecciones" },
@@ -426,6 +444,7 @@ export default function AdminPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {inspections.map((insp) => {
+                    // Si llega un estado no contemplado, se usa badge genérico.
                     const badge = ESTADO[insp.estado] ?? {
                       label: insp.estado,
                       cls: "bg-slate-100 text-slate-600 ring-slate-200",

@@ -27,5 +27,9 @@ class User(AbstractUser):
     def is_operator(self):
         return self.role == self.Role.OPERARIO
 
+    def role_display(self) -> str:
+        roles = {str(valor): etiqueta for valor, etiqueta in self.Role.choices}
+        return roles.get(self.role, self.role)
+
     def __str__(self):
-        return f"{self.username} - {self.get_role_display()}"
+        return f"{self.username} - {self.role_display()}"
