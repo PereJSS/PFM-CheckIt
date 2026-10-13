@@ -1,7 +1,7 @@
 from celery import shared_task
 
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+@shared_task(bind=True, max_retries=3, default_retry_delay=60, time_limit=300, soft_time_limit=270)
 def generar_pdf_async(self, inspeccion_id):
     from .models import Inspeccion
     from .services.pdf_generator import generar_informe_base
