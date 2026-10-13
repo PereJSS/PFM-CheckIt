@@ -8,8 +8,6 @@ from django.core import signing
 from django.core.signing import BadSignature, SignatureExpired
 from .models import Inspeccion
 from .serializers import InspeccionSerializer
-from .services.pdf_generator import generar_informe_base
-from .services.pdf_signer import firmar_pdf_reclamacion
 from .services.tsa import solicitar_sello_tiempo
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -203,38 +201,58 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             return Response({"error": "Solo el administrador propietario puede eliminar inspecciones."}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
-    # Creamos el endpoint: GET /api/v1/inspecciones/{id}/claim-report/
     @action(detail=True, methods=['get'], url_path='claim-report')
     def claim_report(self, request, pk=None):
         usuario = request.user
-
-        # Seguridad: solo el admin propietario de la inspección puede descargar el informe.
         inspeccion = get_object_or_404(Inspeccion, pk=pk)
         can_download = (
             _is_admin_user(usuario)
             and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
         )
-
         if not can_download:
             return Response(
-                {"error": "No tienes permisos para descargar informes periciales."}, 
-                status=403
+                {"error": "No tienes permisos para descargar informes periciales."},
+                status=403,
             )
 
-        
-        # 1. Dibujamos el PDF
-        input_pdf = generar_informe_base(inspeccion)
-        
-        # 2. Aplicamos la firma criptográfica X.509
-        ruta_final = f"tmp/Reclamacion_Fianza_{inspeccion.pk}_Firmada.pdf"
-        signed_pdf = firmar_pdf_reclamacion(input_pdf, ruta_final)
-        
-        # 3. Devolvemos el archivo binario al navegador para su descarga
-        return FileResponse(
-            open(signed_pdf, 'rb'), 
-            as_attachment=True, 
-            filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf"
+        if inspeccion.pdf_estado == Inspeccion.PdfEstado.LISTO and inspeccion.pdf_ruta:
+            import os as _os
+            if _os.path.exists(inspeccion.pdf_ruta):
+                return FileResponse(
+                    open(inspeccion.pdf_ruta, 'rb'),
+                    as_attachment=True,
+                    filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf",
+                )
+
+        if inspeccion.pdf_estado == Inspeccion.PdfEstado.GENERANDO:
+            return Response(
+                {"estado": inspeccion.pdf_estado, "mensaje": "El PDF ya está siendo generado."},
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        from .tasks import generar_pdf_async
+        task = generar_pdf_async.delay(inspeccion.pk)
+        inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
+        inspeccion.save(update_fields=['pdf_estado'])
+        return Response(
+            {"task_id": task.id, "estado": inspeccion.pdf_estado, "mensaje": "Generación de PDF iniciada."},
+            status=status.HTTP_202_ACCEPTED,
         )
+
+    @action(detail=True, methods=['get'], url_path='claim-report-status')
+    def claim_report_status(self, request, pk=None):
+        usuario = request.user
+        inspeccion = get_object_or_404(Inspeccion, pk=pk)
+        can_download = (
+            _is_admin_user(usuario)
+            and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
+        )
+        if not can_download:
+            return Response({"error": "No tienes permisos."}, status=403)
+        return Response({
+            "estado": inspeccion.pdf_estado,
+            "pdf_listo": inspeccion.pdf_estado == Inspeccion.PdfEstado.LISTO,
+        })
 
     @action(detail=True, methods=['post'], url_path='evidencias')
     def upload_evidence(self, request, pk=None):

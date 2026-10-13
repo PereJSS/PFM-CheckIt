@@ -10,13 +10,21 @@ class Inspeccion(models.Model):
         EN_PROGRESO = 'EN_PROGRESO', 'En progreso'
         COMPLETADA = 'COMPLETADA', 'Completada'
 
+    class PdfEstado(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        GENERANDO = 'GENERANDO', 'Generando'
+        LISTO = 'LISTO', 'Listo'
+        ERROR = 'ERROR', 'Error'
+
     # toda inspeccion está asociada a una propiedad y a un operario (usuario)
     propiedad = models.ForeignKey(Propiedad, on_delete=models.CASCADE, related_name="inspecciones")
     operario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="inspecciones_asignadas")
-    
+
     # Datos de la inspección
     fecha_creacion = models.DateTimeField(auto_now_add=True)
     estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
+    pdf_estado = models.CharField(max_length=10, choices=PdfEstado.choices, default=PdfEstado.PENDIENTE)
+    pdf_ruta = models.CharField(max_length=500, blank=True, null=True)
 
     def __str__(self) -> str:
         return f"Inspección {self.pk} - {self.propiedad.nombre} asignada a {self.operario.username if self.operario else 'Sin operario'} - Estado: {self.estado_display()}"
