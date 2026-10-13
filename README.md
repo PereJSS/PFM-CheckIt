@@ -24,6 +24,7 @@ Cuando una inspección se completa, el backend puede generar un informe PDF firm
 | Persistencia        | SQLite (local), PostgreSQL (producción)      |
 | Firma PDF           | ReportLab, pyHanko                           |
 | Integridad temporal | RFC3161 (TSA)                                |
+| Tareas asíncronas   | Celery 5.3, Redis (broker)                   |
 
 ---
 
@@ -34,13 +35,14 @@ checkIt/
 ├── run_gunicorn.sh         # Arranque de Django con gunicorn
 ├── requirements.txt        # Dependencias del entorno/host (no app)
 ├── checkIt/
-│   ├── core/                # settings, urls, wsgi, asgi
+│   ├── Procfile             # Procesos web + worker para Render
+│   ├── core/                # settings, urls, wsgi, asgi, celery.py
 │   ├── users/               # auth y roles (admin/operario)
 │   ├── propiedades/         # CRUD de propiedades
-│   ├── inspecciones/        # inspecciones, evidencias, PDF, TSA
+│   ├── inspecciones/        # inspecciones, evidencias, PDF, TSA, tasks.py
 │   ├── certs/               # clave/certificado de firma PDF
-│   ├── media/               # ficheros subidos
-│   ├── tmp/                 # PDFs generados/firmados
+│   ├── media/               # ficheros subidos (excluido de git)
+│   ├── tmp/                 # PDFs generados/firmados (excluido de git)
 │   ├── generar_certs.py     # script para crear certificado local de firma
 │   ├── seed_demo.py         # script de carga de datos demo
 │   ├── manage.py
@@ -76,7 +78,8 @@ checkIt/
 - El frontend protege rutas por rol:
   - / para administrador.
   - /operario para operario.
-- El endpoint claim-report permite descargar PDF solo al admin propietario de la inspección.
+- El endpoint `claim-report` inicia la generación del PDF (async) o lo descarga si ya está listo; solo el admin propietario de la inspección puede acceder.
+- El endpoint `claim-report-status` permite sondear el estado de generación (PENDIENTE / GENERANDO / LISTO / ERROR).
 - El endpoint de subida de evidencias permite al operario asignado o al admin propietario.
 
 ### Sesión por pestaña
@@ -158,18 +161,23 @@ Opcionalmente puedes indicar número de workers:
 
 ## Variables de entorno backend
 
-El proyecto usa python-decouple. Debes definir al menos:
+El proyecto usa python-decouple. Variables disponibles:
 
-- SECRET_KEY (obligatoria)
-- DEBUG (opcional, por defecto false)
-- ALLOWED_HOSTS (opcional)
+| Variable              | Obligatoria | Descripción                                          |
+| --------------------- | ----------- | ---------------------------------------------------- |
+| `SECRET_KEY`          | Sí          | Clave secreta Django                                 |
+| `DEBUG`               | No          | Por defecto `False`                                  |
+| `ALLOWED_HOSTS`       | No          | Hosts permitidos                                     |
+| `REDIS_URL`           | En producción | URL del broker Redis para Celery (`redis://…`)     |
+| `DB_HOST`             | Producción  | Host PostgreSQL                                      |
+| `DB_NAME`             | Producción  | Nombre de la base de datos                           |
+| `DB_USER`             | Producción  | Usuario PostgreSQL                                   |
+| `DB_PASSWORD`         | Producción  | Contraseña PostgreSQL                                |
+| `DB_PORT`             | No          | Puerto PostgreSQL (por defecto `5432`)               |
+| `CORS_ALLOWED_ORIGINS`| No          | Orígenes permitidos para CORS                        |
+| `CSRF_TRUSTED_ORIGINS`| No          | Orígenes de confianza para CSRF                      |
 
-Y para despliegue frontend/backend separados también:
-
-- CORS_ALLOWED_ORIGINS
-- CSRF_TRUSTED_ORIGINS
-
-Ejemplo mínimo de .env para desarrollo:
+Ejemplo mínimo de .env para desarrollo local (sin Redis):
 
 ```env
 SECRET_KEY=tu_clave_local_segura
@@ -177,7 +185,7 @@ DEBUG=True
 ALLOWED_HOSTS=localhost,127.0.0.1
 ```
 
-Para PostgreSQL en producción se leen también variables DB_HOST, DB_NAME, DB_USER, DB_PASSWORD y DB_PORT.
+Sin `REDIS_URL`, el broker apunta a `redis://localhost:6379/0`. La API funciona con normalidad pero el endpoint `claim-report` requiere Redis y un worker Celery corriendo para generar el PDF.
 
 ---
 
@@ -242,8 +250,9 @@ Base URL: /api/v1
 | GET       | /inspecciones/{id}/              | Detalle inspección                   | JWT con alcance por rol                     |
 | PUT/PATCH | /inspecciones/{id}/              | Actualiza inspección                 | JWT con alcance por rol                     |
 | DELETE    | /inspecciones/{id}/              | Elimina inspección                   | JWT con alcance por rol                     |
-| GET       | /inspecciones/{id}/claim-report/ | Descarga PDF firmado                 | JWT (admin propietario)                     |
-| POST      | /inspecciones/{id}/evidencias/   | Sube evidencia con hash/TSA opcional | JWT (operario asignado o admin propietario) |
+| GET       | /inspecciones/{id}/claim-report/        | Inicia generación de PDF (202) o descarga si ya está listo (200) | JWT (admin propietario) |
+| GET       | /inspecciones/{id}/claim-report-status/ | Estado del PDF: PENDIENTE / GENERANDO / LISTO / ERROR            | JWT (admin propietario) |
+| POST      | /inspecciones/{id}/evidencias/          | Sube evidencia con hash/TSA opcional                             | JWT (operario asignado o admin propietario) |
 
 ### Auditoría pública
 
@@ -251,6 +260,43 @@ Base URL: /api/v1
 | ------ | ------------------ | -------------------------------------- | ------- |
 | GET    | /audit/{id}/       | Consulta hash y timestamp de evidencia | Pública |
 | GET    | /audit/{id}/token/ | Descarga token TSA en binario          | Pública |
+
+---
+
+## Generación de PDF asíncrona (Celery + Redis)
+
+El endpoint `claim-report` ya no bloquea el worker HTTP durante la firma X.509. El flujo es:
+
+1. El admin llama a `GET /inspecciones/{id}/claim-report/`.
+2. Si el PDF ya está generado (`pdf_estado=LISTO`), se descarga directamente.
+3. Si no, el backend encola la tarea Celery y devuelve **202 Accepted** con un `task_id`.
+4. El frontend sondea `GET /inspecciones/{id}/claim-report-status/` hasta que `pdf_listo=true`.
+5. Una segunda llamada a `claim-report/` descarga el fichero.
+
+El worker reintenta la generación hasta 3 veces (intervalo 60 s) si falla. Tras 5 minutos sin completarse, la tarea expira y `pdf_estado` pasa a `ERROR`.
+
+### Arranque local con Redis
+
+```bash
+# Terminal 1 — Redis (requiere Redis instalado)
+redis-server
+
+# Terminal 2 — Worker Celery
+source .env/bin/activate
+cd checkIt
+celery -A core worker --loglevel=info
+```
+
+### Despliegue en Render
+
+En el dashboard de Render, además del servicio web existente:
+
+1. Añadir add-on **Redis** y copiar la URL de conexión.
+2. Configurar env var `REDIS_URL` en el servicio web con esa URL.
+3. Crear un segundo servicio **Background Worker** con:
+   - Build command: igual que el web
+   - Start command: `celery -A core worker --loglevel=info`
+   - Misma env var `REDIS_URL`
 
 ---
 
@@ -273,7 +319,10 @@ Admin registra cuenta
   -> crea propiedades
     -> crea operarios
       -> crea inspecciones
-        -> operario sube evidencias
+        -> operario sube evidencias (hash SHA-256 + sello TSA)
           -> completa inspección
-            -> admin descarga informe firmado
+            -> admin solicita informe (claim-report → 202)
+              -> worker Celery genera y firma PDF (X.509)
+                -> admin sondea estado (claim-report-status)
+                  -> descarga informe cuando pdf_estado=LISTO
 ```
