@@ -10,7 +10,11 @@ from .models import Inspeccion
 from .serializers import InspeccionSerializer
 from .services.tsa import solicitar_sello_tiempo
 from rest_framework.views import APIView
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.permissions import AllowAny
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
 from .models import Evidencia
 from django.http import HttpResponse
@@ -303,8 +307,19 @@ class InspeccionViewSet(viewsets.ModelViewSet):
 
 class EvidenceAuditView(APIView):
     # Acceso por token firmado (compartible) o por permisos de usuario autenticado.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auditoria'
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        parameters=[OpenApiParameter('t', OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description='Token de auditoría firmado (alternativa a estar autenticado).')],
+        responses=inline_serializer('AuditoriaEvidencia', {
+            'evidencia_id': drf_serializers.IntegerField(),
+            'hash_sha256': drf_serializers.CharField(),
+            'tsa_timestamp': drf_serializers.DateTimeField(allow_null=True),
+            'mensaje': drf_serializers.CharField(),
+        }),
+    )
     def get(self, request, id):
         """ GET /api/v1/audit/{id}/ """
         evidencia = get_object_or_404(Evidencia, pk=id)
@@ -324,8 +339,14 @@ class EvidenceAuditView(APIView):
         })
 
 class EvidenceTokenView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auditoria'
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        parameters=[OpenApiParameter('t', OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description='Token de auditoría firmado (alternativa a estar autenticado).')],
+        responses={(200, 'application/timestamp-reply'): OpenApiTypes.BINARY},
+    )
     def get(self, request, id):
         """ GET /api/v1/audit/{id}/token/ """
         evidencia = get_object_or_404(Evidencia, pk=id)

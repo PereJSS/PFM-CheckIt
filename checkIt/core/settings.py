@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # Librerías externas
     'rest_framework',
+    'drf_spectacular',
     'corsheaders',
     # aplicaciones
     'users',
@@ -167,10 +168,32 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated', # Cierra la API por defecto
     ),
-    # Solo se aplica a las vistas con throttle_scope (webhooks de PMS)
+    # Proxies de confianza delante de la app (Render pone uno). Sin esto DRF usa toda
+    # la cadena X-Forwarded-For, que controla el cliente, como identidad del throttle
+    # y se puede eludir rotándola. VERIFICAR en producción mirando el X-Forwarded-For
+    # real: podría ser 2 si hay Cloudflare u otro CDN delante.
+    'NUM_PROXIES': config('NUM_PROXIES', default=1, cast=int),
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Solo se aplica a las vistas con throttle_scope
     'DEFAULT_THROTTLE_RATES': {
         'webhooks': config('WEBHOOK_THROTTLE_RATE', default='120/min'),
+        'auditoria': config('AUDIT_THROTTLE_RATE', default='30/min'),
+        'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
+        'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
+        'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),
     },
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'CheckIt API',
+    'DESCRIPTION': (
+        'API de CheckIt: inspecciones con evidencia fotográfica sellada, auditoría '
+        'pública por token y webhooks de entrada desde PMS (autenticación Api-Key).'
+    ),
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Documentación pública a propósito: la consumen los integradores de PMS
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
 }
 
 # Configuración de los tokens JWT
