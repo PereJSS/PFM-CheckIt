@@ -522,3 +522,51 @@ class TSAServiceTest(TestCase):
         with self.assertLogs('inspecciones.services.tsa', level='WARNING') as logs:
             self.assertIsNone(solicitar_sello_tiempo('a' * 64))
         self.assertTrue(all(r.levelname == 'WARNING' for r in logs.records))
+
+
+# ---------------------------------------------------------------------------
+# Throttling de los endpoints públicos de auditoría
+# ---------------------------------------------------------------------------
+
+class AuditThrottleTest(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # el throttle guarda contadores en caché
+        admin = User.objects.create_user(
+            username='admin', password='Pass1234!', role=User.Role.ADMIN
+        )
+        op = User.objects.create_user(
+            username='op', password='Pass1234!', role=User.Role.OPERARIO
+        )
+        prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
+        insp = Inspeccion.objects.create(propiedad=prop, operario=op)
+        self.evidencia = Evidencia.objects.create(
+            inspeccion=insp,
+            foto=SimpleUploadedFile('t.jpg', b'img', content_type='image/jpeg'),
+            hash_sha256='a' * 64,
+        )
+
+    def _limitar(self, rate):
+        from unittest.mock import patch
+        from rest_framework.settings import api_settings
+        from rest_framework.throttling import ScopedRateThrottle
+        rates = {**api_settings.DEFAULT_THROTTLE_RATES, 'auditoria': rate}
+        return patch.object(ScopedRateThrottle, 'THROTTLE_RATES', rates)
+
+    def test_audit_returns_429_over_rate(self):
+        url = '/api/v1/audit/%d/' % self.evidencia.pk
+        with self._limitar('2/min'):
+            codes = [self.client.get(url).status_code for _ in range(3)]
+        self.assertNotIn(status.HTTP_429_TOO_MANY_REQUESTS, codes[:2])
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_audit_token_returns_429_over_rate(self):
+        url = '/api/v1/audit/%d/token/' % self.evidencia.pk
+        with self._limitar('2/min'):
+            codes = [self.client.get(url).status_code for _ in range(3)]
+        self.assertNotIn(status.HTTP_429_TOO_MANY_REQUESTS, codes[:2])
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_audit_default_rate_configured(self):
+        from rest_framework.settings import api_settings
+        self.assertIn('auditoria', api_settings.DEFAULT_THROTTLE_RATES)

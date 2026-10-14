@@ -2,15 +2,29 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView
 from typing import cast
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
 from .models import User
 from .serializers import AdminRegisterSerializer, OperarioCreateSerializer
+
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """Login JWT con límite de peticiones (scope 'auth') contra fuerza bruta."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
 
 class RegisterAdminView(APIView):
     """Registro público para crear un usuario administrador."""
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
+    @extend_schema(request=AdminRegisterSerializer, responses={201: inline_serializer('RegistroOk', {
+        'detail': serializers.CharField(), 'username': serializers.CharField()})})
     def post(self, request):
         serializer = AdminRegisterSerializer(data=request.data)
         if serializer.is_valid():
@@ -25,6 +39,7 @@ class RegisterAdminView(APIView):
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=inline_serializer('Me', {'id': serializers.IntegerField(), 'username': serializers.CharField(), 'email': serializers.CharField(), 'role': serializers.CharField()}))
     def get(self, request):
         user = request.user
         return Response({
@@ -39,6 +54,7 @@ class OperariosView(APIView):
     """Lista y crea usuarios operario. Solo accesible para admins."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=inline_serializer('OperarioItem', {'id': serializers.IntegerField(), 'username': serializers.CharField(), 'email': serializers.CharField(), 'nombre': serializers.CharField()}, many=True))
     def get(self, request):
         if not request.user.is_admin():
             return Response({"error": "Sin permisos."}, status=403)
@@ -54,6 +70,7 @@ class OperariosView(APIView):
         ]
         return Response(data)
 
+    @extend_schema(request=OperarioCreateSerializer, responses={201: inline_serializer('OperarioCreado', {'id': serializers.IntegerField(), 'username': serializers.CharField(), 'nombre': serializers.CharField()})})
     def post(self, request):
         if not request.user.is_admin():
             return Response({"error": "Sin permisos."}, status=403)
@@ -71,6 +88,7 @@ class OperarioDetailView(APIView):
     """Elimina un operario. Solo accesible para admins."""
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(request=None, responses={204: None})
     def delete(self, request, pk):
         if not request.user.is_admin():
             return Response({"error": "Sin permisos."}, status=403)

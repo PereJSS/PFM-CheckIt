@@ -203,3 +203,37 @@ class OperarioDetailViewTest(APITestCase):
         response = self.client.delete(self._url(other_admin.pk))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(User.objects.filter(pk=other_admin.pk).exists())
+
+
+class AuthThrottleTest(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # el throttle guarda contadores en caché
+        User.objects.create_user(username='u1', password='Pass1234!', role=User.Role.ADMIN)
+
+    def _limitar(self, rate):
+        from unittest.mock import patch
+        from rest_framework.settings import api_settings
+        from rest_framework.throttling import ScopedRateThrottle
+        rates = {**api_settings.DEFAULT_THROTTLE_RATES, 'auth': rate}
+        return patch.object(ScopedRateThrottle, 'THROTTLE_RATES', rates)
+
+    def test_login_returns_429_over_rate(self):
+        data = {'username': 'u1', 'password': 'mala'}
+        with self._limitar('2/min'):
+            codes = [self.client.post('/api/v1/auth/login/', data).status_code for _ in range(3)]
+        self.assertEqual(codes[:2], [status.HTTP_401_UNAUTHORIZED] * 2)
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_register_returns_429_over_rate(self):
+        with self._limitar('2/min'):
+            codes = [self.client.post('/api/v1/auth/register/', {}).status_code for _ in range(3)]
+        self.assertNotIn(status.HTTP_429_TOO_MANY_REQUESTS, codes[:2])
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_login_and_register_share_auth_scope(self):
+        with self._limitar('2/min'):
+            self.client.post('/api/v1/auth/login/', {'username': 'u1', 'password': 'x'})
+            self.client.post('/api/v1/auth/login/', {'username': 'u1', 'password': 'x'})
+            resp = self.client.post('/api/v1/auth/register/', {})
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

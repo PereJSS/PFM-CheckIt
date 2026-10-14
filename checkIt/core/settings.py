@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # Librerías externas
     'rest_framework',
+    'drf_spectacular',
     'corsheaders',
     # aplicaciones
     'users',
@@ -167,10 +168,23 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated', # Cierra la API por defecto
     ),
-    # Solo se aplica a las vistas con throttle_scope (webhooks de PMS)
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Solo se aplica a las vistas con throttle_scope
     'DEFAULT_THROTTLE_RATES': {
         'webhooks': config('WEBHOOK_THROTTLE_RATE', default='120/min'),
+        'auditoria': config('AUDIT_THROTTLE_RATE', default='30/min'),
+        'auth': config('AUTH_THROTTLE_RATE', default='10/min'),
     },
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'CheckIt API',
+    'DESCRIPTION': (
+        'API de CheckIt: inspecciones con evidencia fotográfica sellada, auditoría '
+        'pública por token y webhooks de entrada desde PMS (autenticación Api-Key).'
+    ),
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
 }
 
 # Configuración de los tokens JWT
