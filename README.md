@@ -328,3 +328,12 @@ Admin registra cuenta
                 -> admin sondea estado (claim-report-status)
                   -> descarga informe cuando pdf_estado=LISTO
 ```
+
+---
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) se ejecuta en cada push y pull request a `master`, sin secretos:
+
+- **Backend**: Python 3.10 y 3.13 (3.10 es el mínimo por `psycopg[binary]==3.3.4`), instala `checkIt/requirements.txt`, ejecuta `makemigrations --check --dry-run` y `manage.py test` (SQLite; Celery y TSA mockeados).
+- **Frontend**: Node 20, instala dependencias, `npm run lint` (no bloqueante mientras haya errores de ESLint pendientes) y `npm run build`.
