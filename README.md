@@ -96,7 +96,7 @@ La sesión de frontend usa sessionStorage (no localStorage):
 
 ### Requisitos
 
-- Python 3.8+
+- Python 3.10+ (`psycopg[binary]==3.3.4` no instala en versiones anteriores)
 - Node.js 18+
 
 ### Backend
@@ -169,8 +169,19 @@ El proyecto usa python-decouple. Variables disponibles:
 | `SECRET_KEY`          | Sí          | Clave secreta Django                                 |
 | `DEBUG`               | No          | Por defecto `False`                                  |
 | `ALLOWED_HOSTS`       | No          | Hosts permitidos                                     |
-| `REDIS_URL`           | En producción | URL del broker Redis para Celery (`redis://…`)     |
+| `REDIS_URL`           | En producción | URL de Redis: broker de Celery y, si está definida, caché compartida (throttling y lock del re-sellado TSA) |
 | `WEBHOOK_THROTTLE_RATE` | No        | Límite del endpoint de webhooks (por defecto `120/min`) |
+| `AUDIT_THROTTLE_RATE` | No          | Límite de la auditoría pública por IP (por defecto `30/min`) |
+| `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
+| `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
+| `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
+| `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`, el de Render). **Verificar en producción**: con Cloudflare delante puede ser `2` |
+| `WEBHOOK_SALIENTE_TIMEOUT_CONEXION` | No | Timeout de conexión de los webhooks salientes en segundos (por defecto `3`) |
+| `WEBHOOK_SALIENTE_TIMEOUT` | No     | Timeout de lectura de los webhooks salientes en segundos (por defecto `5`) |
+| `WEBHOOK_SALIENTE_MAX_REINTENTOS` | No | Reintentos ante 5xx o error de red (por defecto `5`) |
+| `WEBHOOK_SALIENTE_BACKOFF_BASE` | No | Base del backoff exponencial en segundos: `base·2^n` (por defecto `30`) |
+| `WEBHOOK_SALIENTE_MAX_DESTINOS` | No | Máximo de destinos activos por administrador (por defecto `10`) |
+| `WEBHOOK_SALIENTE_PERMITIR_LOCAL` | No | **Solo desarrollo.** Permite `http` y destinos locales o privados, desactivando la protección SSRF (por defecto `False`) |
 | `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
 | `TSA_RESELLO_BATCH_SIZE` | No        | Máximo de evidencias sin sello que reintenta cada ejecución de la tarea periódica (por defecto `20`) |
@@ -280,6 +291,11 @@ Cada propiedad admite un `external_id` opcional (único por admin): el identific
 | DELETE | /integraciones/api-keys/{id}/    | Revoca la API Key (404 si es de otro admin)             | JWT (admin)     |
 | GET    | /integraciones/eventos/          | Últimos 50 eventos recibidos y su estado                | JWT (admin)     |
 | POST   | /webhooks/pms/                   | Recibe un evento del PMS                                | API Key         |
+| GET/POST | /integraciones/destinos/       | Lista o crea destinos de webhooks salientes; el secreto solo se muestra al crear | JWT (admin) |
+| GET/PATCH/DELETE | /integraciones/destinos/{id}/ | Detalle, edición (`activo`, `eventos`…) o borrado del destino | JWT (admin) |
+| POST   | /integraciones/destinos/{id}/rotar-secreto/ | Genera un secreto nuevo (el anterior deja de valer) y lo muestra una vez | JWT (admin) |
+| GET    | /integraciones/entregas/         | Últimas 50 entregas; filtros `?destino=` y `?estado=`   | JWT (admin)     |
+| POST   | /integraciones/entregas/{id}/reintentar/ | Reencola una entrega `FALLIDA` o `PENDIENTE` atascada (>10 min); 409 en otro caso | JWT (admin) |
 
 ---
 
@@ -321,6 +337,43 @@ Seguridad:
 - `data.property_id` se normaliza (texto, sin espacios) igual que el `external_id` de la propiedad.
 
 Procesamiento (`integraciones/tasks.py`): `reservation.checkout` crea una inspección `PENDIENTE` sin operario, que el admin asigna desde el panel. Si la propiedad no existe el evento queda en `ERROR` (visible en `/integraciones/eventos/`); otros tipos de evento quedan en `IGNORADO`. Si el broker Redis no responde (timeout de 2 s), el evento se procesa en línea para no perderlo. Si el procesamiento falla en línea o tras los 3 reintentos de Celery, el evento queda en `ERROR` con el motivo, y el PMS puede reenviarlo.
+
+---
+
+## Webhooks salientes (CheckIt → PMS)
+
+Cada admin puede registrar destinos (`/integraciones/destinos/`, o desde la pestaña **Integraciones** del panel) para que CheckIt avise a su PMS:
+
+- `inspeccion.completada`: la inspección pasa a `COMPLETADA`.
+- `pdf.listo`: el PDF firmado pasa a `LISTO`.
+
+Los eventos se emiten solo en la transición (señales sobre `Inspeccion`) y se encolan tras el commit. Payload:
+
+```json
+{"event_id": "…", "tipo": "pdf.listo", "fecha": "…",
+ "data": {"inspeccion_id": 1, "propiedad_id": 2, "external_id": "LISTING-42", "estado": "COMPLETADA", "pdf_estado": "LISTO"}}
+```
+
+Cabeceras: `X-CheckIt-Signature: sha256=<hex>` (HMAC-SHA256 del cuerpo crudo con el secreto `whsec_…`), `X-CheckIt-Event` y `X-CheckIt-Delivery` (estable entre reintentos). El receptor debe verificar la firma con comparación en tiempo constante, rechazar `fecha` antiguas y **deduplicar por `X-CheckIt-Delivery`**: la entrega es *at-least-once*.
+
+- **Reintentos**: ante 5xx o error de red, backoff exponencial (`30·2^n` s, hasta 5). Un 4xx o 3xx deja la entrega `FALLIDA` sin reintentar; no se siguen redirecciones.
+- **Recuperación**: Celery beat ejecuta cada 5 min `reencolar_entregas_atascadas` (entregas `PENDIENTE` sin actividad >10 min, p. ej. con el broker caído). También se pueden reintentar a mano.
+- **Protección SSRF**: solo `https`; se rechazan userinfo, `\`, URLs ambiguas y hosts que resuelvan a IPs privadas, loopback, link-local, metadatos de nube o rangos de transición IPv6. La IP se valida en el momento de conectar y la conexión se fija a esa IP (con SNI y certificado del hostname original), sin proxies del entorno. Depende de `requests==2.32.4` y `urllib3==2.2.3`: revisar `integraciones/salientes.py` antes de actualizarlas.
+- **Pendiente**: la URL del PDF en `pdf.listo` (requiere un endpoint de descarga firmado) y la purga de entregas antiguas.
+
+---
+
+## Documentación de la API (OpenAPI) y límites de peticiones
+
+La documentación es pública porque la usan los integradores de PMS:
+
+- Esquema: `/api/v1/schema/`
+- Swagger: `/api/v1/docs/`. Para probar el webhook, pulsa **Authorize** en `ApiKeyAuth` y escribe `Api-Key ck_<prefijo>_<secreto>`.
+- Redoc: `/api/v1/redoc/`
+
+El esquema se valida con `python manage.py spectacular --validate --fail-on-warn` (también en el CI).
+
+Límites (respuesta `429` con `Retry-After`): auditoría pública, login (por IP **y** por username), registro y webhooks de entrada; ver las variables `*_THROTTLE_RATE`. La IP del cliente se toma de `X-Forwarded-For` según `NUM_PROXIES`. Los contadores viven en la caché: en producción define `REDIS_URL` para que sean compartidos entre procesos.
 
 ---
 
@@ -412,4 +465,5 @@ Admin registra cuenta
 GitHub Actions (`.github/workflows/ci.yml`) se ejecuta en cada push y pull request a `master`, sin secretos:
 
 - **Backend**: Python 3.10 y 3.13 (3.10 es el mínimo por `psycopg[binary]==3.3.4`), instala `checkIt/requirements.txt`, ejecuta `makemigrations --check --dry-run` y `manage.py test` (SQLite; Celery y TSA mockeados).
-- **Frontend**: Node 20, instala dependencias, `npm run lint` (no bloqueante mientras haya errores de ESLint pendientes) y `npm run build`.
+- **Backend** también valida el esquema OpenAPI (`spectacular --validate --fail-on-warn`).
+- **Frontend**: Node 20, `npm ci`, `npm run lint -- --max-warnings 0` y `npm run build`. El lockfile se regenera con `npx npm@10.8.2 install` para que siga siendo compatible con el npm de Node 20.

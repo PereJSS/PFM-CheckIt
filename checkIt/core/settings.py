@@ -234,7 +234,26 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': max(TSA_RESELLO_INTERVALO_MIN, 1) * 60.0,
         'options': {'expires': max(TSA_RESELLO_INTERVALO_MIN, 1) * 60},
     },
+    # Webhooks salientes: re-encola entregas PENDIENTE atascadas (broker caído, worker muerto)
+    'reencolar-webhooks-atascados': {
+        'task': 'integraciones.tasks.reencolar_entregas_atascadas',
+        'schedule': 300.0,
+        'options': {'expires': 300},
+    },
 }
+
+# Caché compartida entre procesos (throttling de DRF y lock del re-sellado TSA).
+# Sin REDIS_URL explícito (tests, desarrollo) se usa memoria local por proceso.
+_REDIS_CACHE_URL = config('REDIS_URL', default='')
+if _REDIS_CACHE_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _REDIS_CACHE_URL,
+            'KEY_PREFIX': 'checkit',
+            'TIMEOUT': 300,
+        },
+    }
 
 # Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
 TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')

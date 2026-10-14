@@ -524,13 +524,16 @@ class EntregaWebhookTest(BaseSalientesTest):
         # Primera resolución (validación previa) pública; la de la conexión, privada
         mock_dns.side_effect = [IP_PUBLICA, IP_PRIVADA]
         entrega = self._entrega()
-        with patch(URLOPEN, autospec=True) as mock_urlopen:
+        with patch(URLOPEN, autospec=True) as mock_urlopen, \
+                self.assertLogs('integraciones.salientes', level='WARNING') as logs:
             self.assertEqual(entregar(entrega.pk), 'FALLIDA')
         mock_urlopen.assert_not_called()
         self.assertEqual(mock_dns.call_count, 2)
         entrega.refresh_from_db()
         self.assertEqual(entrega.estado, EntregaWebhook.Estado.FALLIDA)
-        self.assertIn('10.0.0.1', entrega.error)
+        # La IP interna va solo al log del servidor, nunca al error visible por el admin
+        self.assertNotIn('10.0.0.1', entrega.error)
+        self.assertTrue(any('10.0.0.1' in linea for linea in logs.output))
 
     def test_url_con_backslash_guardada_se_bloquea_al_entregar(self, _dns):
         entrega = self._entrega()

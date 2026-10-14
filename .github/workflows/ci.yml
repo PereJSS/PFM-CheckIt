@@ -55,6 +55,9 @@ jobs:
       - name: Tests
         run: python manage.py test
 
+      - name: Validar esquema OpenAPI
+        run: python manage.py spectacular --validate --fail-on-warn --file /tmp/schema.yml
+
   frontend:
     name: Frontend (React + Vite)
     runs-on: ubuntu-latest
@@ -71,21 +74,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Instalar dependencias
-        # package-lock.json está desincronizado (entradas @emnapi/*) y `npm ci`
-        # falla. Mientras no se regenere el lockfile, se recurre a `npm install`
-        # y se deja un aviso visible en el resumen del run.
-        run: |
-          if ! npm ci; then
-            echo "::warning file=frontend/package-lock.json::npm ci ha fallado: package-lock.json no está sincronizado con package.json. Ejecuta 'npm install' en frontend/ y haz commit del lockfile."
-            npm install --no-audit --no-fund
-          fi
+        # El lockfile es compatible con npm 10 (Node 20) y npm 11; regenerarlo con
+        # `npx npm@10.8.2 install` para no romper `npm ci` en el CI.
+        run: npm ci
 
       - name: Lint
-        # Hay errores de ESLint preexistentes (react-hooks/set-state-in-effect,
-        # no-unused-vars). No deben bloquear el CI hasta que se corrijan; quitar
-        # continue-on-error cuando `npm run lint` pase limpio.
-        continue-on-error: true
-        run: npm run lint
+        run: npm run lint -- --max-warnings 0
 
       - name: Build
         run: npm run build

@@ -121,7 +121,10 @@ def resolver_ip_publica(host, puerto):
         raise UrlNoPermitida('El host no tiene direcciones.')
     for ip in ips:
         if _ip_no_permitida(ip):
-            raise UrlNoPermitida(f'El host resuelve a una IP no permitida ({ip}).')
+            # La IP concreta solo al log: en el error guardado permitiría descubrir
+            # a qué IPs internas resuelven nombres arbitrarios
+            logger.warning("Destino de webhook bloqueado: %s resuelve a %s", host, ip)
+            raise UrlNoPermitida('El host resuelve a una IP no permitida.')
     return str(ips[0])
 
 

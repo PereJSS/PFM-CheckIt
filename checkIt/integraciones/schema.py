@@ -7,13 +7,18 @@ desde core/urls.py.
 """
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from drf_spectacular.utils import (
-    OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
+    OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
 )
 from rest_framework import serializers
 
-from .serializers import ApiKeySerializer, PmsWebhookSerializer, WebhookEventListSerializer
+from .serializers import (
+    ApiKeySerializer, EntregaWebhookSerializer, PmsWebhookSerializer, WebhookDestinoSerializer,
+    WebhookEventListSerializer,
+)
 from .views import (
-    ApiKeyListCreateView, ApiKeyRevokeView, PmsWebhookView, WebhookEventListView,
+    ApiKeyListCreateView, ApiKeyRevokeView, EntregaWebhookListView, EntregaWebhookReintentarView,
+    PmsWebhookView, WebhookDestinoDetailView, WebhookDestinoListCreateView,
+    WebhookDestinoRotarSecretoView, WebhookEventListView,
 )
 
 
@@ -69,3 +74,51 @@ extend_schema_view(delete=extend_schema(
 extend_schema_view(get=extend_schema(
     summary='Últimos eventos recibidos', responses=WebhookEventListSerializer(many=True),
 ))(WebhookEventListView)
+
+
+# --- Webhooks salientes (destinos y entregas) ---
+
+_DestinoConSecreto = inline_serializer('WebhookDestinoConSecreto', {
+    **WebhookDestinoSerializer().get_fields(),
+    'secreto': serializers.CharField(help_text='Solo se muestra en esta respuesta.'),
+})
+_ErrorDetalle = inline_serializer('ErrorDetalle', {'detail': serializers.CharField()})
+_ErrorConflicto = inline_serializer('ErrorConflicto', {'error': serializers.CharField()})
+
+extend_schema_view(
+    get=extend_schema(summary='Listar destinos de webhooks salientes',
+                      responses=WebhookDestinoSerializer(many=True)),
+    post=extend_schema(summary='Crear destino de webhooks salientes',
+                       request=WebhookDestinoSerializer,
+                       responses={201: _DestinoConSecreto, 400: _ErrorDetalle}),
+)(WebhookDestinoListCreateView)
+
+extend_schema_view(
+    get=extend_schema(summary='Detalle de destino', responses=WebhookDestinoSerializer),
+    patch=extend_schema(summary='Editar destino', request=WebhookDestinoSerializer,
+                        responses={200: WebhookDestinoSerializer, 400: _ErrorDetalle}),
+    put=extend_schema(summary='Editar destino (equivale a PATCH)',
+                      request=WebhookDestinoSerializer,
+                      responses={200: WebhookDestinoSerializer, 400: _ErrorDetalle}),
+    delete=extend_schema(summary='Eliminar destino', request=None,
+                         responses={204: OpenApiResponse(description='Eliminado')}),
+)(WebhookDestinoDetailView)
+
+extend_schema_view(post=extend_schema(
+    summary='Rotar el secreto de firma del destino', request=None,
+    responses={200: _DestinoConSecreto},
+))(WebhookDestinoRotarSecretoView)
+
+extend_schema_view(get=extend_schema(
+    summary='Últimas entregas de webhooks salientes',
+    parameters=[
+        OpenApiParameter('destino', int, description='Filtra por id de destino.'),
+        OpenApiParameter('estado', str, enum=['PENDIENTE', 'ENTREGADA', 'FALLIDA']),
+    ],
+    responses=EntregaWebhookSerializer(many=True),
+))(EntregaWebhookListView)
+
+extend_schema_view(post=extend_schema(
+    summary='Reintentar entrega fallida o atascada', request=None,
+    responses={202: OpenApiResponse(description='Reencolada'), 409: _ErrorConflicto},
+))(EntregaWebhookReintentarView)
