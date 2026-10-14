@@ -40,6 +40,7 @@ checkIt/
 │   ├── users/               # auth y roles (admin/operario)
 │   ├── propiedades/         # CRUD de propiedades
 │   ├── inspecciones/        # inspecciones, evidencias, PDF, TSA, tasks.py
+│   ├── integraciones/       # API Keys B2B y webhooks de PMS externos
 │   ├── certs/               # clave/certificado de firma PDF
 │   ├── media/               # ficheros subidos (excluido de git)
 │   ├── tmp/                 # PDFs generados/firmados (excluido de git)
@@ -169,6 +170,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `DEBUG`               | No          | Por defecto `False`                                  |
 | `ALLOWED_HOSTS`       | No          | Hosts permitidos                                     |
 | `REDIS_URL`           | En producción | URL del broker Redis para Celery (`redis://…`)     |
+| `WEBHOOK_THROTTLE_RATE` | No        | Límite del endpoint de webhooks (por defecto `120/min`) |
 | `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
 | `DB_HOST`             | Producción  | Host PostgreSQL                                      |
@@ -243,6 +245,8 @@ Base URL: /api/v1
 | PUT/PATCH | /propiedades/{id}/ | Actualiza propiedad         | JWT (owner) |
 | DELETE    | /propiedades/{id}/ | Elimina propiedad           | JWT (owner) |
 
+Cada propiedad admite un `external_id` opcional (único por admin): el identificador de esa propiedad en el PMS del cliente, usado para enlazar los webhooks entrantes.
+
 ### Inspecciones y evidencias
 
 | Método    | Ruta                             | Descripción                          | Auth                                        |
@@ -262,6 +266,57 @@ Base URL: /api/v1
 | ------ | ------------------ | -------------------------------------- | ------- |
 | GET    | /audit/{id}/       | Consulta hash y timestamp de evidencia | Pública |
 | GET    | /audit/{id}/token/ | Descarga token TSA en binario          | Pública |
+
+### Integraciones (PMS externos)
+
+| Método | Ruta                             | Descripción                                             | Auth            |
+| ------ | -------------------------------- | ------------------------------------------------------- | --------------- |
+| GET    | /integraciones/api-keys/         | Lista las API Keys del admin (sin la clave)             | JWT (admin)     |
+| POST   | /integraciones/api-keys/         | Crea API Key `{"nombre": "..."}`; la clave solo se muestra en esta respuesta | JWT (admin) |
+| DELETE | /integraciones/api-keys/{id}/    | Revoca la API Key (404 si es de otro admin)             | JWT (admin)     |
+| GET    | /integraciones/eventos/          | Últimos 50 eventos recibidos y su estado                | JWT (admin)     |
+| POST   | /webhooks/pms/                   | Recibe un evento del PMS                                | API Key         |
+
+---
+
+## Webhooks de PMS (API Keys)
+
+CheckIt puede recibir eventos de un PMS/ERP externo (Guesty, Hostaway, Smoobu…) sin que el cliente cambie de software. Flujo: **reserva finalizada → inspección pendiente automática**.
+
+1. El admin crea una API Key en `POST /api/v1/integraciones/api-keys/` y la configura en su PMS. Solo se guarda su hash SHA-256: si se pierde, se revoca y se crea otra.
+2. El admin rellena el `external_id` de cada propiedad con el ID que usa su PMS.
+3. El PMS envía los eventos:
+
+```http
+POST /api/v1/webhooks/pms/
+Authorization: Api-Key ck_<prefijo>_<secreto>
+Content-Type: application/json
+
+{
+  "event_id": "evt_123",
+  "event_type": "reservation.checkout",
+  "provider": "guesty",
+  "data": { "property_id": "LISTING-42", "reservation_id": "R-998" }
+}
+```
+
+| Respuesta | Significado |
+| --------- | ----------- |
+| `202`     | Evento nuevo guardado y encolado en Celery |
+| `202` con `"duplicado": true` | Reenvío de un evento que quedó en `RECIBIDO` o `ERROR`: se vuelve a encolar (p. ej. tras enlazar el `external_id` que faltaba) |
+| `200` con `"duplicado": true` | Reenvío de un evento ya `PROCESADO` o `IGNORADO`; no se repite |
+| `400`     | Payload inválido (falta `event_id` o `event_type`, o `data.property_id` no es texto/número en un checkout) |
+| `401`     | API Key ausente, incorrecta o revocada |
+| `429`     | Límite de peticiones superado (`WEBHOOK_THROTTLE_RATE`, por defecto `120/min`) |
+
+Seguridad:
+
+- La API Key **solo** sirve en `/webhooks/pms/`; no da acceso al resto de la API (que sigue siendo JWT). Una clave filtrada no permite leer evidencias ni gestionar operarios.
+- El evento solo puede crear inspecciones en propiedades del admin dueño de la clave.
+- Idempotencia por `(admin, provider, event_id)` + bloqueo de fila al procesar: los reintentos nunca duplican inspecciones.
+- `data.property_id` se normaliza (texto, sin espacios) igual que el `external_id` de la propiedad.
+
+Procesamiento (`integraciones/tasks.py`): `reservation.checkout` crea una inspección `PENDIENTE` sin operario, que el admin asigna desde el panel. Si la propiedad no existe el evento queda en `ERROR` (visible en `/integraciones/eventos/`); otros tipos de evento quedan en `IGNORADO`. Si el broker Redis no responde (timeout de 2 s), el evento se procesa en línea para no perderlo. Si el procesamiento falla en línea o tras los 3 reintentos de Celery, el evento queda en `ERROR` con el motivo, y el PMS puede reenviarlo.
 
 ---
 

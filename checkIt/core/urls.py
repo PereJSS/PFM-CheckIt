@@ -40,4 +40,5 @@ urlpatterns = [
     # apps
     path('api/v1/', include('propiedades.urls')),
     path('api/v1/', include('inspecciones.urls')),
+    path('api/v1/', include('integraciones.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

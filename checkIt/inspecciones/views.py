@@ -16,6 +16,7 @@ from .models import Evidencia
 from django.http import HttpResponse
 from django.db.models import QuerySet
 from typing import cast
+from users.permissions import es_admin
 
 
 MAX_EVIDENCE_SIZE_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -30,17 +31,7 @@ AUDIT_TOKEN_SALT = 'checkit.evidence.audit'
 AUDIT_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 dias
 
 
-def _is_admin_user(usuario):
-    # Robustez: admite roles legacy y flags de Django incluso si el método is_admin no existe.
-    if not getattr(usuario, "is_authenticated", False):
-        return False
-
-    role = str(getattr(usuario, "role", "") or "").strip().upper()
-    return (
-        role in {"ADMINISTRADOR", "ADMIN"}
-        or bool(getattr(usuario, "is_superuser", False))
-        or bool(getattr(usuario, "is_staff", False))
-    )
+_is_admin_user = es_admin
 
 
 def _is_operario_user(usuario):

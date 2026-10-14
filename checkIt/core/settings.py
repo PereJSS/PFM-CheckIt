@@ -49,7 +49,8 @@ INSTALLED_APPS = [
     # aplicaciones
     'users',
     'propiedades',
-    'inspecciones'
+    'inspecciones',
+    'integraciones',
     
     
 ]
@@ -166,6 +167,10 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated', # Cierra la API por defecto
     ),
+    # Solo se aplica a las vistas con throttle_scope (webhooks de PMS)
+    'DEFAULT_THROTTLE_RATES': {
+        'webhooks': config('WEBHOOK_THROTTLE_RATE', default='120/min'),
+    },
 }
 
 # Configuración de los tokens JWT
@@ -191,6 +196,9 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TIMEZONE = 'UTC'
+# Si Redis no responde, fallar rápido al publicar tareas desde una petición HTTP
+CELERY_BROKER_CONNECTION_TIMEOUT = 2
+CELERY_BROKER_TRANSPORT_OPTIONS = {'socket_connect_timeout': 2}
 
 # Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
 TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')
