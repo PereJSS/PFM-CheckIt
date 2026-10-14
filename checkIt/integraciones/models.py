@@ -1,5 +1,6 @@
 import hashlib
 import secrets
+import uuid
 
 from django.conf import settings
 from django.db import models
@@ -94,3 +95,88 @@ class WebhookEvent(models.Model):
 
     def __str__(self):
         return f"{self.proveedor}:{self.event_id} ({self.tipo}) - {self.estado}"
+
+
+# --- Webhooks salientes (CheckIt -> PMS del cliente) ---
+
+EVENTO_INSPECCION_COMPLETADA = 'inspeccion.completada'
+EVENTO_PDF_LISTO = 'pdf.listo'
+EVENTOS_SALIENTES = (EVENTO_INSPECCION_COMPLETADA, EVENTO_PDF_LISTO)
+SECRETO_PREFIX = 'whsec'
+
+
+def _eventos_por_defecto():
+    return list(EVENTOS_SALIENTES)
+
+
+def generar_secreto_webhook():
+    return f"{SECRETO_PREFIX}_{secrets.token_hex(32)}"
+
+
+class WebhookDestino(models.Model):
+    """
+    URL del PMS del cliente a la que CheckIt notifica eventos. El secreto se guarda
+    en claro porque hace falta para firmar (HMAC); solo se muestra al crearlo.
+    """
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='webhook_destinos',
+        verbose_name="Propietario (admin)",
+    )
+    nombre = models.CharField(max_length=100, blank=True, default='')
+    url = models.URLField(max_length=500)
+    secreto = models.CharField(max_length=80, default=generar_secreto_webhook, editable=False)
+    eventos = models.JSONField(default=_eventos_por_defecto)
+    activo = models.BooleanField(default=True)
+    creado = models.DateTimeField(auto_now_add=True)
+    actualizado = models.DateTimeField(auto_now=True)
+
+    @property
+    def secreto_prefijo(self):
+        # Pista para identificarlo: últimos 4 caracteres (no reduce la entropía útil)
+        return f"{SECRETO_PREFIX}_…{self.secreto[-4:]}"
+
+    def rotar_secreto(self):
+        self.secreto = generar_secreto_webhook()
+        self.save(update_fields=['secreto', 'actualizado'])
+        return self.secreto
+
+    def __str__(self):
+        estado = 'activo' if self.activo else 'inactivo'
+        return f"{self.nombre or self.url} - {estado}"
+
+
+class EntregaWebhook(models.Model):
+    """Un envío de un evento a un destino, con su historial de intentos."""
+    class Estado(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        ENTREGADA = 'ENTREGADA', 'Entregada'
+        FALLIDA = 'FALLIDA', 'Fallida'
+
+    destino = models.ForeignKey(WebhookDestino, on_delete=models.CASCADE, related_name='entregas')
+    evento = models.CharField(max_length=64)
+    # event_id identifica el evento (compartido entre destinos); entrega_id, este envío
+    event_id = models.UUIDField()
+    entrega_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    inspeccion = models.ForeignKey(
+        'inspecciones.Inspeccion',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='entregas_webhook',
+    )
+    payload = models.JSONField(default=dict)
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
+    intentos = models.PositiveIntegerField(default=0)
+    ultimo_codigo = models.PositiveSmallIntegerField(blank=True, null=True)
+    error = models.TextField(blank=True, default='')
+    creada = models.DateTimeField(auto_now_add=True)
+    actualizada = models.DateTimeField(auto_now=True)
+    entregada = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['destino', '-creada'])]
+
+    def __str__(self):
+        return f"{self.evento} -> {self.destino_id} ({self.estado}, {self.intentos} intentos)"
