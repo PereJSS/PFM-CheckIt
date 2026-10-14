@@ -30,10 +30,8 @@ function ProtectedRoute({ children, allowedRoles }) {
   );
 
   useEffect(() => {
-    if (!token) {
-      setIsLoading(false);
-      return;
-    }
+    // Sin token isLoading ya parte en false (ver useState), no hay nada que validar.
+    if (!token) return;
 
     // Valida sesión vigente y obtiene rol real del usuario autenticado.
     api

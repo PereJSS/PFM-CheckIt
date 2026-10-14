@@ -24,16 +24,20 @@ function CameraModal({ onCapture, onClose }) {
   const streamRef = useRef(null);
   // ready controla cuándo puede dispararse la foto; error muestra fallback de UI.
   const [ready, setReady] = useState(false);
-  const [error, setError] = useState(null);
+  // El soporte de getUserMedia se conoce al montar: se deriva en el estado inicial.
+  const [error, setError] = useState(() =>
+    navigator.mediaDevices?.getUserMedia
+      ? null
+      : "Tu navegador no soporta acceso a la cámara.",
+  );
 
   useEffect(() => {
     // mounted evita actualizar estado si el modal se desmonta durante tareas async.
     let mounted = true;
+    // Copia del nodo <video> para usarla de forma estable en el cleanup.
+    const videoNode = videoRef.current;
 
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError("Tu navegador no soporta acceso a la cámara.");
-      return;
-    }
+    if (!navigator.mediaDevices?.getUserMedia) return;
 
     // Espera a que el video reciba un frame real para evitar capturas negras.
     const waitForFirstFrame = (videoEl, timeout = 3000) => {
@@ -175,8 +179,8 @@ function CameraModal({ onCapture, onClose }) {
       mounted = false;
       setReady(false);
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
+      if (videoNode) {
+        videoNode.srcObject = null;
       }
 
       if (streamRef.current) {
