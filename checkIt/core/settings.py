@@ -200,6 +200,19 @@ CELERY_TIMEZONE = 'UTC'
 CELERY_BROKER_CONNECTION_TIMEOUT = 2
 CELERY_BROKER_TRANSPORT_OPTIONS = {'socket_connect_timeout': 2}
 
+# Celery beat: re-sellado periódico de evidencias sin sello TSA (modo degradado)
+TSA_RESELLO_BATCH_SIZE = config('TSA_RESELLO_BATCH_SIZE', default=20, cast=int)
+TSA_RESELLO_MAX_FALLOS = config('TSA_RESELLO_MAX_FALLOS', default=3, cast=int)
+TSA_RESELLO_PAUSA_SEG = config('TSA_RESELLO_PAUSA_SEG', default=1.0, cast=float)
+TSA_RESELLO_INTERVALO_MIN = config('TSA_RESELLO_INTERVALO_MIN', default=10, cast=int)
+CELERY_BEAT_SCHEDULE = {
+    'resellar-evidencias-pendientes': {
+        'task': 'inspecciones.tasks.resellar_evidencias_pendientes',
+        'schedule': max(TSA_RESELLO_INTERVALO_MIN, 1) * 60.0,
+        'options': {'expires': max(TSA_RESELLO_INTERVALO_MIN, 1) * 60},
+    },
+}
+
 # Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
 TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')
 TSA_TIMEOUT = config('TSA_TIMEOUT', default='3')
