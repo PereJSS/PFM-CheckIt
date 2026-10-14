@@ -1,80 +1,85 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import api from "../../services/api";
+import useListado from "./useListado";
 import {
   ALERT_ERROR,
   BADGE,
   BTN_SECONDARY,
   CARD,
+  COLOR,
   INPUT,
   LABEL,
+  LINK_ACCION,
   TD,
   TH,
+  VACIO,
   formatFecha,
+  mensajeError,
 } from "./estilos";
 
 const ESTADO_ENTREGA = {
-  PENDIENTE: {
-    label: "Pendiente",
-    cls: "bg-amber-50 text-amber-700 ring-amber-200",
-  },
-  ENTREGADA: {
-    label: "Entregada",
-    cls: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  },
-  FALLIDA: { label: "Fallida", cls: "bg-red-50 text-red-700 ring-red-200" },
+  PENDIENTE: { label: "Pendiente", cls: COLOR.ambar },
+  ENTREGADA: { label: "Entregada", cls: COLOR.verde },
+  FALLIDA: { label: "Fallida", cls: COLOR.rojo },
 };
+
+// El backend permite reintentar una entrega FALLIDA, o una PENDIENTE cuyo
+// "actualizada" tenga más de 10 minutos (atascada). El resto da 409.
+const PENDIENTE_ATASCADA_MS = 10 * 60 * 1000;
+
+const reintentable = (e, ahora) =>
+  e.estado === "FALLIDA" ||
+  (e.estado === "PENDIENTE" &&
+    ahora - Date.parse(e.actualizada ?? e.creada) > PENDIENTE_ATASCADA_MS);
 
 // Historial de entregas (GET /integraciones/entregas/, últimas 50).
 // Los filtros ?destino y ?estado se resuelven en el servidor.
 export default function EntregasWebhook({ destinos }) {
-  const [entregas, setEntregas] = useState([]);
-  const [cargando, setCargando] = useState(true);
-  const [error, setError] = useState(null);
   const [filtros, setFiltros] = useState({ destino: "", estado: "" });
-  const [reintentando, setReintentando] = useState(null);
-
-  const cargar = useCallback(
-    (f) => {
-      const params = {};
-      if (f.destino) params.destino = f.destino;
-      if (f.estado) params.estado = f.estado;
-      return api
-        .get("/integraciones/entregas/", { params })
-        .then((res) => {
-          setEntregas(res.data);
-          setError(null);
-        })
-        .catch(() => setError("No se pudieron cargar las entregas."))
-        .finally(() => setCargando(false));
-    },
-    [],
+  const query = new URLSearchParams(
+    Object.entries(filtros).filter(([, v]) => v),
+  ).toString();
+  const {
+    datos: entregas,
+    cargando,
+    error,
+    instante,
+    recargar,
+  } = useListado(
+    "/integraciones/entregas/",
+    query,
+    "No se pudieron cargar las entregas.",
   );
+  const [reintentando, setReintentando] = useState(null);
+  const [accionError, setAccionError] = useState(null);
 
-  useEffect(() => {
-    cargar(filtros);
-  }, [cargar, filtros]);
-
-  const cambiarFiltro = (campo, valor) => {
-    setCargando(true);
+  const cambiarFiltro = (campo, valor) =>
     setFiltros((f) => ({ ...f, [campo]: valor }));
-  };
 
   const handleReintentar = async (e) => {
+    setAccionError(null);
     setReintentando(e.id);
     try {
       await api.post(`/integraciones/entregas/${e.id}/reintentar/`);
-      await cargar(filtros);
+      recargar();
     } catch (err) {
-      setError(
+      setAccionError(
         err.response?.status === 409
           ? err.response.data?.error ||
-              "Solo se pueden reintentar entregas fallidas."
-          : "No se pudo reintentar la entrega. Inténtalo de nuevo.",
+              "Esta entrega no se puede reintentar ahora."
+          : mensajeError(
+              err,
+              "No se pudo reintentar la entrega. Inténtalo de nuevo.",
+            ),
       );
+      // El estado pudo cambiar en el servidor (p. ej. ya entregada): refrescamos.
+      recargar();
     } finally {
       setReintentando(null);
     }
   };
+
+  const mensajeAlerta = error || accionError;
 
   return (
     <div>
@@ -119,10 +124,7 @@ export default function EntregasWebhook({ destinos }) {
           </div>
           <button
             type="button"
-            onClick={() => {
-              setCargando(true);
-              cargar(filtros);
-            }}
+            onClick={recargar}
             disabled={cargando}
             className={BTN_SECONDARY}
           >
@@ -131,21 +133,19 @@ export default function EntregasWebhook({ destinos }) {
         </div>
       </div>
 
-      {error && (
+      {mensajeAlerta && (
         <div role="alert" className={ALERT_ERROR}>
-          {error}
+          {mensajeAlerta}
         </div>
       )}
 
       <div className={CARD} aria-busy={cargando}>
         {cargando && entregas.length === 0 ? (
-          <p className="px-5 py-10 text-center text-slate-400 text-sm">
-            Cargando entregas…
-          </p>
+          <p className={VACIO}>Cargando entregas…</p>
         ) : entregas.length === 0 ? (
           !error && (
-            <p className="px-5 py-10 text-center text-slate-400 text-sm">
-              {filtros.destino || filtros.estado
+            <p className={VACIO}>
+              {query
                 ? "No hay entregas con esos filtros."
                 : "Todavía no se ha enviado ningún webhook."}
             </p>
@@ -169,7 +169,7 @@ export default function EntregasWebhook({ destinos }) {
                 {entregas.map((e) => {
                   const badge = ESTADO_ENTREGA[e.estado] ?? {
                     label: e.estado,
-                    cls: "bg-slate-100 text-slate-600 ring-slate-200",
+                    cls: COLOR.gris,
                   };
                   return (
                     <tr key={e.id} className="hover:bg-slate-50 transition">
@@ -204,13 +204,13 @@ export default function EntregasWebhook({ destinos }) {
                         {e.error || <span className="text-slate-400">—</span>}
                       </td>
                       <td className={TD}>
-                        {e.estado === "FALLIDA" && (
+                        {reintentable(e, instante) && (
                           <button
                             type="button"
                             onClick={() => handleReintentar(e)}
                             disabled={reintentando === e.id}
                             aria-label={`Reintentar la entrega ${e.entrega_id}`}
-                            className="text-xs text-blue-600 hover:underline font-medium disabled:opacity-50"
+                            className={LINK_ACCION}
                           >
                             {reintentando === e.id
                               ? "Reintentando…"

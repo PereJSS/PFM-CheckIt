@@ -1,50 +1,51 @@
-import { useCallback, useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import api from "../../services/api";
 import SecretoUnaVez from "./SecretoUnaVez";
+import useListado from "./useListado";
 import {
   ALERT_ERROR,
   BADGE,
   BTN_PRIMARY,
+  BTN_SUBMIT,
   CARD,
+  COLOR,
+  FIELD_ERROR,
+  FORM_CARD,
   INPUT,
   LABEL,
+  LINK_PELIGRO,
   TD,
   TH,
+  VACIO,
+  ariaCampo,
   erroresDRF,
   formatFecha,
+  mensajeError,
 } from "./estilos";
 
 // Gestión de API keys (GET/POST /integraciones/api-keys/, DELETE .../<id>/ para revocar).
 export default function ApiKeysSection() {
-  const [claves, setClaves] = useState([]);
-  const [cargando, setCargando] = useState(true);
-  const [error, setError] = useState(null);
+  const {
+    datos: claves,
+    cargando,
+    error,
+    recargar,
+  } = useListado(
+    "/integraciones/api-keys/",
+    "",
+    "No se pudieron cargar las API keys.",
+  );
 
   const [showForm, setShowForm] = useState(false);
   const [nombre, setNombre] = useState("");
   const [formErrors, setFormErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [revocando, setRevocando] = useState(null);
+  const [accionError, setAccionError] = useState(null);
+  const botonNuevaRef = useRef(null);
 
   // Clave en claro recién creada. Solo en memoria: nunca en storage.
   const [claveNueva, setClaveNueva] = useState(null);
-
-  const cargar = useCallback(
-    () =>
-      api
-        .get("/integraciones/api-keys/")
-        .then((res) => {
-          setClaves(res.data);
-          setError(null);
-        })
-        .catch(() => setError("No se pudieron cargar las API keys."))
-        .finally(() => setCargando(false)),
-    [],
-  );
-
-  useEffect(() => {
-    cargar();
-  }, [cargar]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -57,7 +58,7 @@ export default function ApiKeysSection() {
       setClaveNueva({ nombre: data.nombre, clave: data.clave });
       setNombre("");
       setShowForm(false);
-      cargar();
+      recargar();
     } catch (err) {
       setFormErrors(erroresDRF(err, "No se pudo crear la API key."));
     } finally {
@@ -72,16 +73,26 @@ export default function ApiKeysSection() {
       )
     )
       return;
+    setAccionError(null);
     setRevocando(k.id);
     try {
       await api.delete(`/integraciones/api-keys/${k.id}/`);
-      await cargar();
-    } catch {
-      setError("No se pudo revocar la API key. Inténtalo de nuevo.");
+      recargar();
+    } catch (err) {
+      setAccionError(
+        mensajeError(err, "No se pudo revocar la API key. Inténtalo de nuevo."),
+      );
     } finally {
       setRevocando(null);
     }
   };
+
+  const cerrarAviso = () => {
+    setClaveNueva(null);
+    botonNuevaRef.current?.focus();
+  };
+
+  const mensajeAlerta = error || accionError;
 
   return (
     <section aria-labelledby="titulo-api-keys" className="mb-12">
@@ -98,7 +109,10 @@ export default function ApiKeysSection() {
           </p>
         </div>
         <button
+          ref={botonNuevaRef}
           type="button"
+          aria-expanded={showForm}
+          aria-controls="form-api-key"
           onClick={() => {
             setShowForm((v) => !v);
             setFormErrors({});
@@ -110,19 +124,22 @@ export default function ApiKeysSection() {
         </button>
       </div>
 
+      {/* Anuncio sin el valor del secreto; la región existe siempre para que se lea. */}
+      <p role="status" className="sr-only">
+        {claveNueva ? "API key creada" : ""}
+      </p>
+
       {claveNueva && (
         <SecretoUnaVez
+          key={claveNueva.clave}
           titulo={`API key "${claveNueva.nombre}" creada`}
           valor={claveNueva.clave}
-          onCerrar={() => setClaveNueva(null)}
+          onCerrar={cerrarAviso}
         />
       )}
 
       {showForm && (
-        <form
-          onSubmit={handleSubmit}
-          className="mb-6 bg-white border border-slate-200 rounded-xl p-6 shadow-sm"
-        >
+        <form id="form-api-key" onSubmit={handleSubmit} className={FORM_CARD}>
           <h3 className="text-base font-semibold text-slate-800 mb-4">
             Crear API key
           </h3>
@@ -138,42 +155,39 @@ export default function ApiKeysSection() {
               maxLength={100}
               placeholder="Guesty producción"
               className={INPUT}
+              {...ariaCampo(formErrors, "nombre", "api-key-nombre-error")}
             />
             {formErrors.nombre && (
-              <p className="mt-1 text-xs text-red-600">{formErrors.nombre}</p>
+              <p id="api-key-nombre-error" className={FIELD_ERROR}>
+                {formErrors.nombre}
+              </p>
             )}
           </div>
           {formErrors.non_field_errors && (
-            <p className="mt-3 text-xs text-red-600">
+            <p role="alert" className="mt-3 text-xs text-red-600">
               {formErrors.non_field_errors}
             </p>
           )}
           <div className="mt-4 flex justify-end">
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-5 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
-            >
+            <button type="submit" disabled={saving} className={BTN_SUBMIT}>
               {saving ? "Creando…" : "Crear API key"}
             </button>
           </div>
         </form>
       )}
 
-      {error && (
+      {mensajeAlerta && (
         <div role="alert" className={ALERT_ERROR}>
-          {error}
+          {mensajeAlerta}
         </div>
       )}
 
       <div className={CARD} aria-busy={cargando}>
-        {cargando ? (
-          <p className="px-5 py-10 text-center text-slate-400 text-sm">
-            Cargando API keys…
-          </p>
+        {cargando && claves.length === 0 ? (
+          <p className={VACIO}>Cargando API keys…</p>
         ) : claves.length === 0 ? (
           !error && (
-            <p className="px-5 py-10 text-center text-slate-400 text-sm">
+            <p className={VACIO}>
               Aún no tienes API keys. Crea una para conectar tu PMS.
             </p>
           )
@@ -206,19 +220,11 @@ export default function ApiKeysSection() {
                       {k.ultimo_uso ? formatFecha(k.ultimo_uso) : "Nunca"}
                     </td>
                     <td className={TD}>
-                      {k.revocada ? (
-                        <span
-                          className={`${BADGE} bg-red-50 text-red-700 ring-red-200`}
-                        >
-                          Revocada
-                        </span>
-                      ) : (
-                        <span
-                          className={`${BADGE} bg-emerald-50 text-emerald-700 ring-emerald-200`}
-                        >
-                          Activa
-                        </span>
-                      )}
+                      <span
+                        className={`${BADGE} ${k.revocada ? COLOR.rojo : COLOR.verde}`}
+                      >
+                        {k.revocada ? "Revocada" : "Activa"}
+                      </span>
                     </td>
                     <td className={TD}>
                       {!k.revocada && (
@@ -227,7 +233,7 @@ export default function ApiKeysSection() {
                           onClick={() => handleRevocar(k)}
                           disabled={revocando === k.id}
                           aria-label={`Revocar la API key ${k.nombre}`}
-                          className="text-xs text-red-500 hover:underline font-medium disabled:opacity-50"
+                          className={LINK_PELIGRO}
                         >
                           {revocando === k.id ? "Revocando…" : "Revocar"}
                         </button>

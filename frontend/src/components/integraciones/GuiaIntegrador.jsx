@@ -1,5 +1,5 @@
 import { apiBaseUrl } from "../../services/api";
-import { CARD } from "./estilos";
+import { CARD, CODE, PRE } from "./estilos";
 
 // URL absoluta del webhook de entrada (integraciones/urls.py: webhooks/pms/).
 // apiBaseUrl puede ser relativa ("/api/v1") o absoluta (VITE_API_URL).
@@ -16,10 +16,6 @@ const PAYLOAD_EJEMPLO = {
   provider: "guesty",
   data: { property_id: "LISTING-42" },
 };
-
-const PRE =
-  "mt-2 overflow-x-auto rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100";
-const CODE = "font-mono text-xs bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded";
 
 export default function GuiaIntegrador() {
   const url = webhookUrl();

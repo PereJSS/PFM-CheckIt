@@ -39,7 +39,7 @@ api.interceptors.response.use(
         10,
       );
       const mensaje = Number.isFinite(segundos)
-        ? `Demasiados intentos, espera ${segundos} s y vuelve a probar.`
+        ? `Demasiados intentos, espera ${Math.max(1, segundos)} s y vuelve a probar.`
         : "Demasiados intentos, espera un momento y vuelve a probar.";
       error.message = mensaje;
       error.response.data = { detail: mensaje, non_field_errors: mensaje };

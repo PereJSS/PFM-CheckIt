@@ -1,12 +1,20 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { BTN_SUBMIT } from "./estilos";
 
 // Aviso con un secreto (API key o secreto de firma) que el backend solo devuelve
 // una vez. Vive únicamente en el estado de React del padre: nunca se guarda en
 // localStorage/sessionStorage, y al cerrar el aviso se descarta.
+// Al montarse mueve el foco a su título; al cerrar, el padre devuelve el foco
+// al botón que originó la acción (onCerrar).
 export default function SecretoUnaVez({ titulo, valor, onCerrar }) {
   const [mensaje, setMensaje] = useState("");
   const inputRef = useRef(null);
+  const tituloRef = useRef(null);
   const id = useId();
+
+  useEffect(() => {
+    tituloRef.current?.focus();
+  }, []);
 
   const copiar = async () => {
     try {
@@ -27,10 +35,15 @@ export default function SecretoUnaVez({ titulo, valor, onCerrar }) {
       aria-labelledby={`${id}-titulo`}
       className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-5"
     >
-      <h3 id={`${id}-titulo`} className="text-sm font-semibold text-amber-900">
+      <h3
+        id={`${id}-titulo`}
+        ref={tituloRef}
+        tabIndex={-1}
+        className="text-sm font-semibold text-amber-900 focus:outline-none"
+      >
         {titulo}
       </h3>
-      <p className="mt-1 text-sm text-amber-800">
+      <p id={`${id}-ayuda`} className="mt-1 text-sm text-amber-800">
         Copia este valor ahora y guárdalo en un lugar seguro.{" "}
         <strong>No se volverá a mostrar.</strong>
       </p>
@@ -43,6 +56,7 @@ export default function SecretoUnaVez({ titulo, valor, onCerrar }) {
           ref={inputRef}
           readOnly
           value={valor}
+          aria-describedby={`${id}-ayuda`}
           onFocus={(e) => e.target.select()}
           autoComplete="off"
           spellCheck={false}
@@ -51,7 +65,7 @@ export default function SecretoUnaVez({ titulo, valor, onCerrar }) {
         <button
           type="button"
           onClick={copiar}
-          className="shrink-0 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition"
+          className={`shrink-0 ${BTN_SUBMIT}`}
         >
           Copiar
         </button>

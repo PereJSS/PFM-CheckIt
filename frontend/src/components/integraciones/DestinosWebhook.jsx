@@ -1,17 +1,26 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import api from "../../services/api";
 import SecretoUnaVez from "./SecretoUnaVez";
 import {
   ALERT_ERROR,
   BADGE,
   BTN_PRIMARY,
+  BTN_SUBMIT,
   CARD,
+  COLOR,
+  FIELD_ERROR,
+  FORM_CARD,
   INPUT,
   LABEL,
+  LINK_ACCION,
+  LINK_PELIGRO,
   TD,
   TH,
+  VACIO,
+  ariaCampo,
   erroresDRF,
   formatFecha,
+  mensajeError,
 } from "./estilos";
 
 // Eventos suscribibles según el contrato de webhooks salientes.
@@ -26,6 +35,8 @@ const DESTINO_EMPTY = {
   eventos: EVENTOS_SALIENTES.map((e) => e.valor),
 };
 
+const idBotonRotar = (id) => `rotar-secreto-${id}`;
+
 // Destinos de webhooks salientes. Los datos los carga el padre
 // (WebhooksSalientesSection) porque también los usa el filtro de entregas.
 export default function DestinosWebhook({ destinos, cargando, error, recargar }) {
@@ -35,7 +46,9 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
   const [saving, setSaving] = useState(false);
   const [accionError, setAccionError] = useState(null);
   const [ocupado, setOcupado] = useState(null);
-  // Secreto de firma recién creado. Solo en memoria: nunca en storage.
+  const botonNuevoRef = useRef(null);
+  // Secreto de firma recién creado o rotado. Solo en memoria: nunca en storage.
+  // origen: id del destino rotado (para devolver el foco a su botón) o null si es alta.
   const [secretoNuevo, setSecretoNuevo] = useState(null);
 
   const toggleEvento = (valor) =>
@@ -60,60 +73,107 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
         url: form.url.trim(),
         eventos: form.eventos,
       });
-      setSecretoNuevo({ url: data.url, secreto: data.secreto });
+      setSecretoNuevo({
+        titulo: `Destino creado: secreto de firma de ${data.url}`,
+        anuncio: "Destino creado",
+        secreto: data.secreto,
+        origen: null,
+      });
       setForm(DESTINO_EMPTY);
       setShowForm(false);
       recargar();
     } catch (err) {
+      // El 400 por máximo de destinos activos llega como {"detail": "..."}.
       setFormErrors(erroresDRF(err, "No se pudo crear el destino."));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleToggleActivo = async (d) => {
+  // Ejecuta una acción sobre un destino con su estado de "ocupado" y error.
+  const accion = async (d, peticion, textoError) => {
     setAccionError(null);
     setOcupado(d.id);
     try {
-      await api.patch(`/integraciones/destinos/${d.id}/`, {
-        activo: !d.activo,
-      });
-      await recargar();
-    } catch {
-      setAccionError("No se pudo actualizar el destino. Inténtalo de nuevo.");
+      const res = await peticion();
+      recargar();
+      return res;
+    } catch (err) {
+      setAccionError(mensajeError(err, textoError));
+      return null;
     } finally {
       setOcupado(null);
     }
   };
 
-  const handleDelete = async (d) => {
+  const handleToggleActivo = (d) =>
+    accion(
+      d,
+      () =>
+        api.patch(`/integraciones/destinos/${d.id}/`, { activo: !d.activo }),
+      "No se pudo actualizar el destino. Inténtalo de nuevo.",
+    );
+
+  const handleRotar = async (d) => {
+    if (
+      !window.confirm(
+        `¿Rotar el secreto de ${d.url}? El secreto actual dejará de valer al momento y tendrás que configurar el nuevo en tu sistema.`,
+      )
+    )
+      return;
+    const res = await accion(
+      d,
+      () => api.post(`/integraciones/destinos/${d.id}/rotar-secreto/`),
+      "No se pudo rotar el secreto. Inténtalo de nuevo.",
+    );
+    if (res?.data?.secreto) {
+      setSecretoNuevo({
+        titulo: `Nuevo secreto de firma de ${d.url}`,
+        anuncio: "Secreto rotado",
+        secreto: res.data.secreto,
+        origen: d.id,
+      });
+    }
+  };
+
+  const handleDelete = (d) => {
     if (
       !window.confirm(
         `¿Eliminar el destino ${d.url}? También se borrará su historial de entregas.`,
       )
     )
       return;
-    setAccionError(null);
-    setOcupado(d.id);
-    try {
-      await api.delete(`/integraciones/destinos/${d.id}/`);
-      await recargar();
-    } catch {
-      setAccionError("No se pudo eliminar el destino. Inténtalo de nuevo.");
-    } finally {
-      setOcupado(null);
-    }
+    accion(
+      d,
+      () => api.delete(`/integraciones/destinos/${d.id}/`),
+      "No se pudo eliminar el destino. Inténtalo de nuevo.",
+    );
+  };
+
+  const cerrarAviso = () => {
+    const origen = secretoNuevo?.origen;
+    setSecretoNuevo(null);
+    const boton =
+      origen != null
+        ? document.getElementById(idBotonRotar(origen))
+        : botonNuevoRef.current;
+    (boton ?? botonNuevoRef.current)?.focus();
   };
 
   const etiquetaEvento = (valor) =>
     EVENTOS_SALIENTES.find((e) => e.valor === valor)?.label ?? valor;
+
+  const mensajeAlerta = error || accionError;
 
   return (
     <div className="mb-8">
       <div className="mb-4 flex items-center justify-between">
         <h3 className="text-base font-semibold text-slate-800">Destinos</h3>
         <button
+          ref={botonNuevoRef}
           type="button"
+          aria-expanded={showForm}
+          aria-controls="form-destino"
           onClick={() => {
             setShowForm((v) => !v);
             setFormErrors({});
@@ -125,19 +185,22 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
         </button>
       </div>
 
+      {/* Anuncio sin el valor del secreto; la región existe siempre para que se lea. */}
+      <p role="status" className="sr-only">
+        {secretoNuevo ? secretoNuevo.anuncio : ""}
+      </p>
+
       {secretoNuevo && (
         <SecretoUnaVez
-          titulo={`Secreto de firma del destino ${secretoNuevo.url}`}
+          key={secretoNuevo.secreto}
+          titulo={secretoNuevo.titulo}
           valor={secretoNuevo.secreto}
-          onCerrar={() => setSecretoNuevo(null)}
+          onCerrar={cerrarAviso}
         />
       )}
 
       {showForm && (
-        <form
-          onSubmit={handleSubmit}
-          className="mb-6 bg-white border border-slate-200 rounded-xl p-6 shadow-sm"
-        >
+        <form id="form-destino" onSubmit={handleSubmit} className={FORM_CARD}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label htmlFor="destino-nombre" className={LABEL}>
@@ -152,9 +215,12 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
                 maxLength={100}
                 placeholder="ERP contabilidad"
                 className={INPUT}
+                {...ariaCampo(formErrors, "nombre", "destino-nombre-error")}
               />
               {formErrors.nombre && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.nombre}</p>
+                <p id="destino-nombre-error" className={FIELD_ERROR}>
+                  {formErrors.nombre}
+                </p>
               )}
             </div>
             <div>
@@ -165,16 +231,24 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
                 id="destino-url"
                 type="url"
                 value={form.url}
-                onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, url: e.target.value }))
+                }
                 required
                 placeholder="https://erp.ejemplo.com/webhooks/checkit"
                 className={INPUT}
+                {...ariaCampo(formErrors, "url", "destino-url-error")}
               />
               {formErrors.url && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.url}</p>
+                <p id="destino-url-error" className={FIELD_ERROR}>
+                  {formErrors.url}
+                </p>
               )}
             </div>
-            <fieldset className="sm:col-span-2">
+            <fieldset
+              className="sm:col-span-2"
+              {...ariaCampo(formErrors, "eventos", "destino-eventos-error")}
+            >
               <legend className={LABEL}>
                 Eventos <span className="text-red-500">*</span>
               </legend>
@@ -198,41 +272,37 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
                 ))}
               </div>
               {formErrors.eventos && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.eventos}</p>
+                <p id="destino-eventos-error" className={FIELD_ERROR}>
+                  {formErrors.eventos}
+                </p>
               )}
             </fieldset>
           </div>
           {formErrors.non_field_errors && (
-            <p className="mt-3 text-xs text-red-600">
+            <p role="alert" className="mt-3 text-xs text-red-600">
               {formErrors.non_field_errors}
             </p>
           )}
           <div className="mt-4 flex justify-end">
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-5 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
-            >
+            <button type="submit" disabled={saving} className={BTN_SUBMIT}>
               {saving ? "Creando…" : "Crear destino"}
             </button>
           </div>
         </form>
       )}
 
-      {(error || accionError) && (
+      {mensajeAlerta && (
         <div role="alert" className={ALERT_ERROR}>
-          {error || accionError}
+          {mensajeAlerta}
         </div>
       )}
 
       <div className={CARD} aria-busy={cargando}>
         {cargando && destinos.length === 0 ? (
-          <p className="px-5 py-10 text-center text-slate-400 text-sm">
-            Cargando destinos…
-          </p>
+          <p className={VACIO}>Cargando destinos…</p>
         ) : destinos.length === 0 ? (
           !error && (
-            <p className="px-5 py-10 text-center text-slate-400 text-sm">
+            <p className={VACIO}>
               Aún no hay destinos. Añade una URL para recibir avisos de CheckIt.
             </p>
           )
@@ -246,7 +316,7 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
                   <th className={TH}>Secreto</th>
                   <th className={TH}>Creado</th>
                   <th className={TH}>Estado</th>
-                  <th className={`${TH} w-40`}>Acciones</th>
+                  <th className={`${TH} w-56`}>Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -261,46 +331,49 @@ export default function DestinosWebhook({ destinos, cargando, error, recargar })
                       </div>
                     </td>
                     <td className={`${TD} text-xs text-slate-500`}>
-                      {d.eventos.map(etiquetaEvento).join(", ")}
+                      {(d.eventos ?? []).map(etiquetaEvento).join(", ")}
                     </td>
+                    {/* Texto opaco que identifica el secreto (p. ej. "whsec_…9f3a"). */}
                     <td className={`${TD} font-mono text-xs text-slate-500`}>
-                      {d.secreto_prefijo}
+                      {d.secreto_prefijo || "—"}
                     </td>
                     <td className={`${TD} text-slate-500 whitespace-nowrap`}>
                       {formatFecha(d.creado)}
                     </td>
                     <td className={TD}>
-                      {d.activo ? (
-                        <span
-                          className={`${BADGE} bg-emerald-50 text-emerald-700 ring-emerald-200`}
-                        >
-                          Activo
-                        </span>
-                      ) : (
-                        <span
-                          className={`${BADGE} bg-slate-100 text-slate-600 ring-slate-200`}
-                        >
-                          Pausado
-                        </span>
-                      )}
+                      <span
+                        className={`${BADGE} ${d.activo ? COLOR.verde : COLOR.gris}`}
+                      >
+                        {d.activo ? "Activo" : "Pausado"}
+                      </span>
                     </td>
                     <td className={TD}>
-                      <div className="flex gap-3">
+                      <div className="flex flex-wrap gap-3">
                         <button
                           type="button"
                           onClick={() => handleToggleActivo(d)}
                           disabled={ocupado === d.id}
                           aria-label={`${d.activo ? "Pausar" : "Activar"} el destino ${d.url}`}
-                          className="text-xs text-blue-600 hover:underline font-medium disabled:opacity-50"
+                          className={LINK_ACCION}
                         >
                           {d.activo ? "Pausar" : "Activar"}
+                        </button>
+                        <button
+                          id={idBotonRotar(d.id)}
+                          type="button"
+                          onClick={() => handleRotar(d)}
+                          disabled={ocupado === d.id}
+                          aria-label={`Rotar el secreto del destino ${d.url}`}
+                          className={LINK_ACCION}
+                        >
+                          Rotar secreto
                         </button>
                         <button
                           type="button"
                           onClick={() => handleDelete(d)}
                           disabled={ocupado === d.id}
                           aria-label={`Eliminar el destino ${d.url}`}
-                          className="text-xs text-red-500 hover:underline font-medium disabled:opacity-50"
+                          className={LINK_PELIGRO}
                         >
                           Eliminar
                         </button>

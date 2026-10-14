@@ -238,8 +238,11 @@ export default function AdminPage() {
       setEditingProp(null);
       api.get("/propiedades/").then((res) => setPropiedades(res.data));
     } catch (err) {
+      const data = err.response?.data;
       setPropErrors(
-        err.response?.data || { non_field_errors: "Error al guardar." },
+        data && typeof data === "object"
+          ? data
+          : { non_field_errors: "Error al guardar." },
       );
     } finally {
       setPropSaving(false);
@@ -614,14 +617,31 @@ export default function AdminPage() {
                           external_id: e.target.value,
                         }))
                       }
+                      maxLength={100}
                       placeholder="LISTING-42"
+                      aria-invalid={propErrors.external_id ? true : undefined}
+                      aria-describedby={
+                        propErrors.external_id
+                          ? "prop-external-id-ayuda prop-external-id-error"
+                          : "prop-external-id-ayuda"
+                      }
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                    <p className="mt-1 text-xs text-slate-400">
+                    <p
+                      id="prop-external-id-ayuda"
+                      className="mt-1 text-xs text-slate-400"
+                    >
                       Identificador de la propiedad en tu PMS. Los webhooks lo
                       envían como data.property_id.
                     </p>
-                    {fieldErr(propErrors, "external_id")}
+                    {propErrors.external_id && (
+                      <p
+                        id="prop-external-id-error"
+                        className="mt-1 text-xs text-red-600"
+                      >
+                        {propErrors.external_id}
+                      </p>
+                    )}
                   </div>
                 </div>
                 {propErrors.non_field_errors && (
