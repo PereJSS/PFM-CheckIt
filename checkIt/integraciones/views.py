@@ -13,7 +13,7 @@ from users.permissions import IsAdmin
 
 from .authentication import ApiKeyAuthentication
 from .models import ApiKey, EntregaWebhook, WebhookDestino, WebhookEvent
-from .salientes import encolar_entrega, reabrir_entrega
+from .salientes import MAX_DESTINOS, encolar_entrega, reabrir_entrega
 from .serializers import (
     ApiKeySerializer,
     EntregaWebhookSerializer,
@@ -123,6 +123,20 @@ class WebhookEventListView(APIView):
         return Response(WebhookEventListSerializer(eventos, many=True).data)
 
 
+def _limite_destinos_superado(owner, excluir_pk=None):
+    activos = WebhookDestino.objects.filter(owner=owner, activo=True)
+    if excluir_pk is not None:
+        activos = activos.exclude(pk=excluir_pk)
+    return activos.count() >= MAX_DESTINOS
+
+
+def _respuesta_limite_destinos():
+    return Response(
+        {"detail": f"Has alcanzado el máximo de {MAX_DESTINOS} destinos activos."},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 class WebhookDestinoListCreateView(APIView):
     """Destinos de webhooks salientes (CheckIt -> PMS) del admin autenticado."""
     permission_classes = [IsAuthenticated, IsAdmin]
@@ -134,6 +148,8 @@ class WebhookDestinoListCreateView(APIView):
     def post(self, request):
         serializer = WebhookDestinoSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if serializer.validated_data.get('activo', True) and _limite_destinos_superado(request.user):
+            return _respuesta_limite_destinos()
         destino = serializer.save(owner=request.user)
         # El secreto de firma solo se devuelve aquí; no se puede recuperar después
         return Response(
@@ -153,8 +169,12 @@ class WebhookDestinoDetailView(APIView):
         return Response(WebhookDestinoSerializer(self._destino(request, pk)).data)
 
     def patch(self, request, pk):
-        serializer = WebhookDestinoSerializer(self._destino(request, pk), data=request.data, partial=True)
+        destino = self._destino(request, pk)
+        serializer = WebhookDestinoSerializer(destino, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        reactivar = serializer.validated_data.get('activo') and not destino.activo
+        if reactivar and _limite_destinos_superado(request.user, excluir_pk=destino.pk):
+            return _respuesta_limite_destinos()
         serializer.save()
         return Response(serializer.data)
 
@@ -164,6 +184,16 @@ class WebhookDestinoDetailView(APIView):
     def delete(self, request, pk):
         self._destino(request, pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WebhookDestinoRotarSecretoView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def post(self, request, pk):
+        destino = get_object_or_404(WebhookDestino, pk=pk, owner=request.user)
+        secreto = destino.rotar_secreto()
+        # El anterior deja de valer ya: los envíos pendientes se firman al salir
+        return Response({**WebhookDestinoSerializer(destino).data, "secreto": secreto})
 
 
 class EntregaWebhookListView(APIView):
@@ -187,13 +217,17 @@ class EntregaWebhookListView(APIView):
 
 
 class EntregaWebhookReintentarView(APIView):
+    """
+    Reencola una entrega FALLIDA, o una PENDIENTE atascada (sin movimiento en
+    los últimos 10 min, p. ej. porque el broker estaba caído al emitirla).
+    """
     permission_classes = [IsAuthenticated, IsAdmin]
 
     def post(self, request, pk):
         entrega = get_object_or_404(EntregaWebhook, pk=pk, destino__owner=request.user)
         if not reabrir_entrega(entrega):
             return Response(
-                {"error": "Solo se pueden reintentar entregas fallidas."},
+                {"error": "Solo se pueden reintentar entregas fallidas o pendientes atascadas."},
                 status=status.HTTP_409_CONFLICT,
             )
         transaction.on_commit(lambda: encolar_entrega(entrega.pk))

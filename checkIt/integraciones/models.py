@@ -134,7 +134,13 @@ class WebhookDestino(models.Model):
 
     @property
     def secreto_prefijo(self):
-        return f"{self.secreto[:10]}…"
+        # Pista para identificarlo: últimos 4 caracteres (no reduce la entropía útil)
+        return f"{SECRETO_PREFIX}_…{self.secreto[-4:]}"
+
+    def rotar_secreto(self):
+        self.secreto = generar_secreto_webhook()
+        self.save(update_fields=['secreto', 'actualizado'])
+        return self.secreto
 
     def __str__(self):
         estado = 'activo' if self.activo else 'inactivo'

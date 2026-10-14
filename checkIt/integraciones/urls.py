@@ -8,6 +8,7 @@ from .views import (
     PmsWebhookView,
     WebhookDestinoDetailView,
     WebhookDestinoListCreateView,
+    WebhookDestinoRotarSecretoView,
     WebhookEventListView,
 )
 
@@ -18,6 +19,11 @@ urlpatterns = [
     path('integraciones/eventos/', WebhookEventListView.as_view(), name='webhook-eventos'),
     path('integraciones/destinos/', WebhookDestinoListCreateView.as_view(), name='webhook-destinos'),
     path('integraciones/destinos/<int:pk>/', WebhookDestinoDetailView.as_view(), name='webhook-destino'),
+    path(
+        'integraciones/destinos/<int:pk>/rotar-secreto/',
+        WebhookDestinoRotarSecretoView.as_view(),
+        name='webhook-destino-rotar-secreto',
+    ),
     path('integraciones/entregas/', EntregaWebhookListView.as_view(), name='webhook-entregas'),
     path(
         'integraciones/entregas/<int:pk>/reintentar/',
