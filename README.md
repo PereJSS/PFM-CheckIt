@@ -169,6 +169,8 @@ El proyecto usa python-decouple. Variables disponibles:
 | `DEBUG`               | No          | Por defecto `False`                                  |
 | `ALLOWED_HOSTS`       | No          | Hosts permitidos                                     |
 | `REDIS_URL`           | En producción | URL del broker Redis para Celery (`redis://…`)     |
+| `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
+| `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
 | `DB_HOST`             | Producción  | Host PostgreSQL                                      |
 | `DB_NAME`             | Producción  | Nombre de la base de datos                           |
 | `DB_USER`             | Producción  | Usuario PostgreSQL                                   |

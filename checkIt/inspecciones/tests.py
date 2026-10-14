@@ -487,3 +487,38 @@ class TSAServiceTest(TestCase):
         mock_post.side_effect = Exception('No connection')
         from inspecciones.services.tsa import solicitar_sello_tiempo
         self.assertIsNone(solicitar_sello_tiempo(None))
+
+    @patch('inspecciones.services.tsa.requests.post')
+    def test_default_timeout_is_3_seconds(self, mock_post):
+        mock_post.side_effect = Exception('Network error')
+        from inspecciones.services.tsa import solicitar_sello_tiempo
+        solicitar_sello_tiempo('a' * 64)
+        self.assertEqual(mock_post.call_args.kwargs['timeout'], 3.0)
+
+    @patch('inspecciones.services.tsa.requests.post')
+    def test_custom_timeout_from_settings(self, mock_post):
+        mock_post.side_effect = Exception('Network error')
+        from inspecciones.services.tsa import solicitar_sello_tiempo
+        with self.settings(TSA_TIMEOUT='2.5'):
+            solicitar_sello_tiempo('a' * 64)
+        self.assertEqual(mock_post.call_args.kwargs['timeout'], 2.5)
+
+    @patch('inspecciones.services.tsa.requests.post')
+    def test_invalid_timeouts_fall_back_to_3_seconds_with_warning(self, mock_post):
+        mock_post.side_effect = Exception('Network error')
+        from inspecciones.services.tsa import solicitar_sello_tiempo
+        for valor in ('abc', '10s', '0', '-1', 'nan', 'inf'):
+            with self.subTest(valor=valor), self.settings(TSA_TIMEOUT=valor):
+                with self.assertLogs('inspecciones.services.tsa', level='WARNING') as logs:
+                    solicitar_sello_tiempo('a' * 64)
+                self.assertEqual(mock_post.call_args.kwargs['timeout'], 3.0)
+                self.assertIn('TSA_TIMEOUT no válido', logs.output[0])
+
+    @patch('inspecciones.services.tsa.requests.post')
+    def test_timeout_logged_as_warning_not_error(self, mock_post):
+        import requests
+        mock_post.side_effect = requests.exceptions.Timeout('read timed out')
+        from inspecciones.services.tsa import solicitar_sello_tiempo
+        with self.assertLogs('inspecciones.services.tsa', level='WARNING') as logs:
+            self.assertIsNone(solicitar_sello_tiempo('a' * 64))
+        self.assertTrue(all(r.levelname == 'WARNING' for r in logs.records))

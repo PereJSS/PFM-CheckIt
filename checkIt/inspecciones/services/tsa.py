@@ -1,18 +1,37 @@
-import os
+import math
 import requests
 import rfc3161ng
 import logging
+from django.conf import settings
 from pyasn1.codec.der import encoder as der_encoder
 
 logger = logging.getLogger(__name__)
+
+TSA_TIMEOUT_DEFAULT = 3.0
+
+
+def _tsa_timeout():
+    # Timeout estricto (por conexión y por lectura): si FreeTSA tarda, seguimos
+    # en modo degradado (tsa_token=None). Valores no válidos vuelven al default.
+    raw = getattr(settings, 'TSA_TIMEOUT', TSA_TIMEOUT_DEFAULT)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = None
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        logger.warning(
+            "TSA_TIMEOUT no válido (%r); se usa %ss", raw, TSA_TIMEOUT_DEFAULT
+        )
+        return TSA_TIMEOUT_DEFAULT
+    return timeout
 
 def solicitar_sello_tiempo(evidencia_hash):
     
     #Se comunica con FreeTSA usando el estándar RFC 3161 para obtener 
     #un token inmutable de tiempo basado en el hash de la evidencia.
     
-    tsa_url = os.environ.get('TSA_URL', 'https://freetsa.org/tsr')
-    tsa_timeout = int(os.environ.get('TSA_TIMEOUT', 15))
+    tsa_url = getattr(settings, 'TSA_URL', 'https://freetsa.org/tsr')
+    tsa_timeout = _tsa_timeout()
 
     try:
         # 1. Construimos la petición RFC3161 con SHA-256.
@@ -69,6 +88,13 @@ def solicitar_sello_tiempo(evidencia_hash):
             "token": tsa_token,
             "timestamp": timestamp
         }
+    except requests.exceptions.Timeout:
+        logger.warning(
+            "TSA sin respuesta en %ss url=%s; evidencia sin sello (modo degradado)",
+            tsa_timeout,
+            tsa_url,
+        )
+        return None
     except Exception as e:
         logger.exception("Error al contactar con la TSA: %s", e)
         return None

@@ -191,3 +191,7 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TIMEZONE = 'UTC'
+
+# Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
+TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')
+TSA_TIMEOUT = config('TSA_TIMEOUT', default='3')
