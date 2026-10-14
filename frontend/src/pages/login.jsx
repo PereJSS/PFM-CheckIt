@@ -42,7 +42,7 @@ export default function Login() {
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;
       window.location.href = isAdminRole(role) ? "/" : "/operario";
-    } catch (err) {
+    } catch {
       // Mensaje genérico para no filtrar detalles de autenticación.
       setError("Credenciales incorrectas. Inténtalo de nuevo.");
     } finally {
