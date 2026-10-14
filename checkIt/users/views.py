@@ -7,21 +7,22 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from typing import cast
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers
+from .throttles import LoginUsuarioThrottle
 from .models import User
 from .serializers import AdminRegisterSerializer, OperarioCreateSerializer
 
 
 class ThrottledTokenObtainPairView(TokenObtainPairView):
     """Login JWT con límite de peticiones (scope 'auth') contra fuerza bruta."""
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
+    throttle_classes = [ScopedRateThrottle, LoginUsuarioThrottle]
+    throttle_scope = 'auth_login'
 
 
 class RegisterAdminView(APIView):
     """Registro público para crear un usuario administrador."""
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
+    throttle_scope = 'auth_register'
 
     @extend_schema(request=AdminRegisterSerializer, responses={201: inline_serializer('RegistroOk', {
         'detail': serializers.CharField(), 'username': serializers.CharField()})})

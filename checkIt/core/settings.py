@@ -168,12 +168,19 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated', # Cierra la API por defecto
     ),
+    # Proxies de confianza delante de la app (Render pone uno). Sin esto DRF usa toda
+    # la cadena X-Forwarded-For, que controla el cliente, como identidad del throttle
+    # y se puede eludir rotándola. VERIFICAR en producción mirando el X-Forwarded-For
+    # real: podría ser 2 si hay Cloudflare u otro CDN delante.
+    'NUM_PROXIES': config('NUM_PROXIES', default=1, cast=int),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     # Solo se aplica a las vistas con throttle_scope
     'DEFAULT_THROTTLE_RATES': {
         'webhooks': config('WEBHOOK_THROTTLE_RATE', default='120/min'),
         'auditoria': config('AUDIT_THROTTLE_RATE', default='30/min'),
-        'auth': config('AUTH_THROTTLE_RATE', default='10/min'),
+        'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
+        'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
+        'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),
     },
 }
 
@@ -185,6 +192,8 @@ SPECTACULAR_SETTINGS = {
     ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Documentación pública a propósito: la consumen los integradores de PMS
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
 }
 
 # Configuración de los tokens JWT

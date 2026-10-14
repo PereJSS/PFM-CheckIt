@@ -1,7 +1,9 @@
-from django.test import TestCase
+from django.conf import settings
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 from rest_framework import status
 
+from core.testing import limitar
 from .models import User
 
 
@@ -52,6 +54,11 @@ class UserModelTest(TestCase):
 
 class RegisterAdminViewTest(APITestCase):
     URL = '/api/v1/auth/register/'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # el throttle de registro cuenta en caché
+        self.addCleanup(cache.clear)
 
     def _payload(self, username='newadmin'):
         return {
@@ -209,31 +216,55 @@ class AuthThrottleTest(APITestCase):
     def setUp(self):
         from django.core.cache import cache
         cache.clear()  # el throttle guarda contadores en caché
+        self.addCleanup(cache.clear)
         User.objects.create_user(username='u1', password='Pass1234!', role=User.Role.ADMIN)
 
-    def _limitar(self, rate):
-        from unittest.mock import patch
-        from rest_framework.settings import api_settings
-        from rest_framework.throttling import ScopedRateThrottle
-        rates = {**api_settings.DEFAULT_THROTTLE_RATES, 'auth': rate}
-        return patch.object(ScopedRateThrottle, 'THROTTLE_RATES', rates)
+    def _login(self, username='u1', **extra):
+        return self.client.post(
+            '/api/v1/auth/login/', {'username': username, 'password': 'mala'}, **extra
+        )
 
     def test_login_returns_429_over_rate(self):
-        data = {'username': 'u1', 'password': 'mala'}
-        with self._limitar('2/min'):
-            codes = [self.client.post('/api/v1/auth/login/', data).status_code for _ in range(3)]
+        with limitar(auth_login='2/min'):
+            resps = [self._login() for _ in range(3)]
+        self.assertEqual([r.status_code for r in resps[:2]], [status.HTTP_401_UNAUTHORIZED] * 2)
+        self.assertEqual(resps[2].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Retry-After', resps[2])
+
+    def test_register_returns_429_over_rate(self):
+        with limitar(auth_register='2/min'):
+            resps = [self.client.post('/api/v1/auth/register/', {}) for _ in range(3)]
+        self.assertNotIn(status.HTTP_429_TOO_MANY_REQUESTS, [r.status_code for r in resps[:2]])
+        self.assertEqual(resps[2].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Retry-After', resps[2])
+
+    def test_login_and_register_have_separate_buckets(self):
+        with limitar(auth_login='2/min', auth_register='2/min'):
+            self._login()
+            self._login()
+            resp = self.client.post('/api/v1/auth/register/', {})
+        self.assertNotEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    @override_settings(REST_FRAMEWORK={**settings.REST_FRAMEWORK, 'NUM_PROXIES': 1})
+    def test_spoofed_xff_does_not_bypass_ip_throttle(self):
+        with limitar(auth_login='2/min', auth_usuario='100/min'):
+            codes = [
+                self._login(username='u%d' % i, HTTP_X_FORWARDED_FOR='9.9.9.%d, 10.0.0.1' % i).status_code
+                for i in range(3)
+            ]
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_username_throttle_ignores_ip_and_case(self):
+        with limitar(auth_login='100/min', auth_usuario='2/min'):
+            codes = [
+                self._login(username=name, HTTP_X_FORWARDED_FOR='1.1.1.%d' % i).status_code
+                for i, name in enumerate(['u1', 'U1', ' u1 '])
+            ]
         self.assertEqual(codes[:2], [status.HTTP_401_UNAUTHORIZED] * 2)
         self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
 
-    def test_register_returns_429_over_rate(self):
-        with self._limitar('2/min'):
-            codes = [self.client.post('/api/v1/auth/register/', {}).status_code for _ in range(3)]
-        self.assertNotIn(status.HTTP_429_TOO_MANY_REQUESTS, codes[:2])
-        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
-
-    def test_login_and_register_share_auth_scope(self):
-        with self._limitar('2/min'):
-            self.client.post('/api/v1/auth/login/', {'username': 'u1', 'password': 'x'})
-            self.client.post('/api/v1/auth/login/', {'username': 'u1', 'password': 'x'})
-            resp = self.client.post('/api/v1/auth/register/', {})
-        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+    def test_username_throttle_does_not_affect_other_users(self):
+        with limitar(auth_login='100/min', auth_usuario='1/min'):
+            self._login('u1')
+            resp = self._login('otro')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
