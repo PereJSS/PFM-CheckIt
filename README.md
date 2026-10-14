@@ -171,6 +171,8 @@ El proyecto usa python-decouple. Variables disponibles:
 | `REDIS_URL`           | En producción | URL del broker Redis para Celery (`redis://…`)     |
 | `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
+| `TSA_RESELLO_BATCH_SIZE` | No        | Máximo de evidencias sin sello que reintenta cada ejecución de la tarea periódica (por defecto `50`) |
+| `TSA_RESELLO_INTERVALO_MIN` | No     | Minutos entre ejecuciones del re-sellado vía Celery beat (por defecto `10`) |
 | `DB_HOST`             | Producción  | Host PostgreSQL                                      |
 | `DB_NAME`             | Producción  | Nombre de la base de datos                           |
 | `DB_USER`             | Producción  | Usuario PostgreSQL                                   |
@@ -289,6 +291,16 @@ cd checkIt
 celery -A core worker --loglevel=info
 ```
 
+### Re-sellado TSA periódico (Celery beat)
+
+Si FreeTSA falla o supera el timeout, la evidencia se guarda sin sello (modo degradado). La tarea `inspecciones.tasks.resellar_evidencias_pendientes` se ejecuta cada 10 minutos (`CELERY_BEAT_SCHEDULE`) y reintenta el sellado de las evidencias con hash y sin `tsa_token`, en lotes de `TSA_RESELLO_BATCH_SIZE`. Un fallo individual se registra en el log y no interrumpe el lote. Requiere un proceso beat (único) además del worker:
+
+```bash
+celery -A core beat --loglevel=info
+```
+
+El `Procfile` incluye el proceso `beat`.
+
 ### Despliegue en Render
 
 En el dashboard de Render, además del servicio web existente:
@@ -299,6 +311,7 @@ En el dashboard de Render, además del servicio web existente:
    - Build command: igual que el web
    - Start command: `celery -A core worker --loglevel=info`
    - Misma env var `REDIS_URL`
+4. Crear un tercer servicio **Background Worker** (una sola instancia) con start command `celery -A core beat --loglevel=info` y la misma `REDIS_URL`.
 
 ---
 

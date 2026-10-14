@@ -522,3 +522,102 @@ class TSAServiceTest(TestCase):
         with self.assertLogs('inspecciones.services.tsa', level='WARNING') as logs:
             self.assertIsNone(solicitar_sello_tiempo('a' * 64))
         self.assertTrue(all(r.levelname == 'WARNING' for r in logs.records))
+
+
+# ---------------------------------------------------------------------------
+# Re-sellado periódico de evidencias pendientes (TSA)
+# ---------------------------------------------------------------------------
+
+class ResellarEvidenciasPendientesTest(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='admin_resello', password='x', role='ADMIN',
+        )
+        self.operario = User.objects.create_user(
+            username='op_resello', password='x', role='OPERARIO',
+        )
+        propiedad = Propiedad.objects.create(
+            owner=self.admin, nombre='P', direccion='Calle 1',
+        )
+        self.inspeccion = Inspeccion.objects.create(
+            propiedad=propiedad, operario=self.operario,
+        )
+
+    def _evidencia(self, hash_sha256='a' * 64, tsa_token=None):
+        return Evidencia.objects.create(
+            inspeccion=self.inspeccion, foto=_make_image(),
+            hash_sha256=hash_sha256, tsa_token=tsa_token,
+        )
+
+    @patch('inspecciones.tasks.solicitar_sello_tiempo')
+    def test_sella_pendientes(self, mock_tsa):
+        from django.utils import timezone
+        ahora = timezone.now()
+        mock_tsa.return_value = {'timestamp': ahora, 'token': b'tok'}
+        ev = self._evidencia()
+        from .tasks import resellar_evidencias_pendientes
+        resellar_evidencias_pendientes()
+        ev.refresh_from_db()
+        self.assertEqual(bytes(ev.tsa_token), b'tok')
+        self.assertEqual(ev.tsa_timestamp, ahora)
+        mock_tsa.assert_called_once_with('a' * 64)
+
+    @patch('inspecciones.tasks.solicitar_sello_tiempo')
+    def test_ignora_ya_selladas(self, mock_tsa):
+        ev = self._evidencia(tsa_token=b'viejo')
+        from .tasks import resellar_evidencias_pendientes
+        resellar_evidencias_pendientes()
+        mock_tsa.assert_not_called()
+        ev.refresh_from_db()
+        self.assertEqual(bytes(ev.tsa_token), b'viejo')
+
+    @patch('inspecciones.tasks.solicitar_sello_tiempo')
+    def test_ignora_sin_hash(self, mock_tsa):
+        self._evidencia(hash_sha256=None)
+        from .tasks import resellar_evidencias_pendientes
+        resellar_evidencias_pendientes()
+        mock_tsa.assert_not_called()
+
+    @patch('inspecciones.tasks.solicitar_sello_tiempo')
+    def test_continua_si_una_falla(self, mock_tsa):
+        from django.utils import timezone
+        e1 = self._evidencia(hash_sha256='1' * 64)
+        e2 = self._evidencia(hash_sha256='2' * 64)
+        e3 = self._evidencia(hash_sha256='3' * 64)
+        ahora = timezone.now()
+
+        def fake(h):
+            if h == '1' * 64:
+                return None
+            if h == '2' * 64:
+                raise RuntimeError('FreeTSA caído')
+            return {'timestamp': ahora, 'token': b'ok'}
+
+        mock_tsa.side_effect = fake
+        from .tasks import resellar_evidencias_pendientes
+        with self.assertLogs('inspecciones.tasks', level='WARNING'):
+            resultado = resellar_evidencias_pendientes()
+        for e in (e1, e2, e3):
+            e.refresh_from_db()
+        self.assertIsNone(e1.tsa_token)
+        self.assertIsNone(e2.tsa_token)
+        self.assertEqual(bytes(e3.tsa_token), b'ok')
+        self.assertEqual(mock_tsa.call_count, 3)
+        self.assertEqual(resultado, {'procesadas': 3, 'selladas': 1})
+
+    @patch('inspecciones.tasks.solicitar_sello_tiempo')
+    def test_respeta_tamano_de_lote(self, mock_tsa):
+        from django.utils import timezone
+        mock_tsa.return_value = {'timestamp': timezone.now(), 'token': b'tok'}
+        for i in range(5):
+            self._evidencia(hash_sha256=str(i) * 64)
+        from .tasks import resellar_evidencias_pendientes
+        with self.settings(TSA_RESELLO_BATCH_SIZE=2):
+            resellar_evidencias_pendientes()
+        self.assertEqual(mock_tsa.call_count, 2)
+        self.assertEqual(Evidencia.objects.filter(tsa_token__isnull=False).count(), 2)
+
+    def test_beat_schedule_configurado(self):
+        from django.conf import settings
+        entrada = settings.CELERY_BEAT_SCHEDULE['resellar-evidencias-pendientes']
+        self.assertEqual(entrada['task'], 'inspecciones.tasks.resellar_evidencias_pendientes')

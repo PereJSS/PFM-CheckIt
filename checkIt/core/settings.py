@@ -192,6 +192,16 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TIMEZONE = 'UTC'
 
+# Celery beat: re-sellado periódico de evidencias sin sello TSA (modo degradado)
+TSA_RESELLO_BATCH_SIZE = config('TSA_RESELLO_BATCH_SIZE', default=50, cast=int)
+TSA_RESELLO_INTERVALO_MIN = config('TSA_RESELLO_INTERVALO_MIN', default=10, cast=int)
+CELERY_BEAT_SCHEDULE = {
+    'resellar-evidencias-pendientes': {
+        'task': 'inspecciones.tasks.resellar_evidencias_pendientes',
+        'schedule': TSA_RESELLO_INTERVALO_MIN * 60.0,
+    },
+}
+
 # Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
 TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')
 TSA_TIMEOUT = config('TSA_TIMEOUT', default='3')
