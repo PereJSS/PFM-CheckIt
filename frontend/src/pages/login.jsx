@@ -42,9 +42,14 @@ export default function Login() {
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;
       window.location.href = isAdminRole(role) ? "/" : "/operario";
-    } catch {
-      // Mensaje genérico para no filtrar detalles de autenticación.
-      setError("Credenciales incorrectas. Inténtalo de nuevo.");
+    } catch (err) {
+      // 429: el interceptor de api.js ya trae un mensaje claro ("Demasiados intentos…").
+      // En el resto, mensaje genérico para no filtrar detalles de autenticación.
+      setError(
+        err.response?.status === 429
+          ? err.message
+          : "Credenciales incorrectas. Inténtalo de nuevo.",
+      );
     } finally {
       setLoading(false);
     }

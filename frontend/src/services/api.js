@@ -9,7 +9,7 @@ import {
   setAccessToken,
 } from "./authStorage";
 
-const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
+export const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
 
 const api = axios.create({
   baseURL: apiBaseUrl,
@@ -29,6 +29,22 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const original = error.config;
+
+    // 429 (throttling de DRF): mensaje claro y homogéneo para toda la app. Se deja
+    // en error.message, en data.detail y en data.non_field_errors, que es donde
+    // leen los formularios existentes.
+    if (error.response?.status === 429) {
+      const segundos = Number.parseInt(
+        error.response.headers?.["retry-after"],
+        10,
+      );
+      const mensaje = Number.isFinite(segundos)
+        ? `Demasiados intentos, espera ${Math.max(1, segundos)} s y vuelve a probar.`
+        : "Demasiados intentos, espera un momento y vuelve a probar.";
+      error.message = mensaje;
+      error.response.data = { detail: mensaje, non_field_errors: mensaje };
+      return Promise.reject(error);
+    }
 
     // Solo intentar renovar una vez y solo ante 401
     if (error.response?.status === 401 && !original._retry) {
