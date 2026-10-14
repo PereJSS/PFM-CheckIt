@@ -331,3 +331,354 @@ class ApiKeyGestionTest(BaseIntegracionTest):
     def test_operario_no_ve_eventos(self):
         self.client.force_authenticate(user=self.operario)
         self.assertEqual(self.client.get(EVENTOS_URL).status_code, 403)
+
+
+# --- Webhooks salientes ---
+
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+import json  # noqa: E402
+import socket  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+import requests  # noqa: E402
+from django.test import override_settings  # noqa: E402
+
+from .models import EntregaWebhook, WebhookDestino  # noqa: E402
+from .salientes import UrlNoPermitida, entregar, validar_url_destino  # noqa: E402
+
+DESTINOS_URL = '/api/v1/integraciones/destinos/'
+ENTREGAS_URL = '/api/v1/integraciones/entregas/'
+IP_PUBLICA = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))]
+IP_PRIVADA = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('10.0.0.5', 443))]
+
+
+def _respuesta(codigo):
+    resp = requests.Response()
+    resp.status_code = codigo
+    return resp
+
+
+class BaseSalientesTest(BaseIntegracionTest):
+    def setUp(self):
+        super().setUp()
+        self.destino = WebhookDestino.objects.create(owner=self.admin, url='https://pms.example.com/hook')
+        self.inspeccion = Inspeccion.objects.create(propiedad=self.prop)
+
+    def _completar(self, inspeccion=None):
+        inspeccion = inspeccion or self.inspeccion
+        inspeccion.estado = Inspeccion.Estado.COMPLETADA
+        with self.captureOnCommitCallbacks(execute=True):
+            inspeccion.save()
+
+
+@patch('integraciones.salientes.socket.getaddrinfo', return_value=IP_PUBLICA)
+@patch('integraciones.salientes.requests.post')
+class EntregaWebhookTest(BaseSalientesTest):
+    def _entrega(self):
+        with patch('integraciones.tasks.entregar_webhook.apply_async'):
+            self._completar()
+        return EntregaWebhook.objects.get()
+
+    def test_firma_y_cabeceras_correctas(self, mock_post, _dns):
+        mock_post.return_value = _respuesta(200)
+        entrega = self._entrega()
+        self.assertEqual(entregar(entrega.pk), 'ENTREGADA')
+
+        _, kwargs = mock_post.call_args
+        cuerpo = kwargs['data']
+        esperada = hmac.new(self.destino.secreto.encode(), cuerpo, hashlib.sha256).hexdigest()
+        self.assertEqual(kwargs['headers']['X-CheckIt-Signature'], f'sha256={esperada}')
+        self.assertEqual(kwargs['headers']['X-CheckIt-Event'], 'inspeccion.completada')
+        self.assertEqual(kwargs['headers']['X-CheckIt-Delivery'], str(entrega.entrega_id))
+        self.assertFalse(kwargs['allow_redirects'])
+        self.assertLessEqual(kwargs['timeout'], 10)
+
+        payload = json.loads(cuerpo)
+        self.assertEqual(payload['tipo'], 'inspeccion.completada')
+        self.assertEqual(payload['event_id'], str(entrega.event_id))
+        self.assertEqual(payload['data']['inspeccion_id'], self.inspeccion.pk)
+        self.assertEqual(payload['data']['propiedad_id'], self.prop.pk)
+        self.assertEqual(payload['data']['external_id'], 'LISTING-42')
+        self.assertIn('fecha', payload)
+
+        entrega.refresh_from_db()
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.ENTREGADA)
+        self.assertEqual(entrega.ultimo_codigo, 200)
+        self.assertEqual(entrega.intentos, 1)
+        self.assertIsNotNone(entrega.entregada)
+
+    def test_5xx_reintenta_hasta_el_maximo(self, mock_post, _dns):
+        from .tasks import entregar_webhook
+        mock_post.return_value = _respuesta(503)
+        entrega = self._entrega()
+        entregar_webhook.apply(args=[entrega.pk])  # en modo eager los reintentos se ejecutan en cadena
+        entrega.refresh_from_db()
+        self.assertEqual(mock_post.call_count, entregar_webhook.max_retries + 1)
+        self.assertEqual(entrega.intentos, entregar_webhook.max_retries + 1)
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.FALLIDA)
+        self.assertEqual(entrega.ultimo_codigo, 503)
+
+    def test_5xx_y_luego_exito(self, mock_post, _dns):
+        from .tasks import entregar_webhook
+        mock_post.side_effect = [_respuesta(500), _respuesta(201)]
+        entrega = self._entrega()
+        entregar_webhook.apply(args=[entrega.pk])
+        entrega.refresh_from_db()
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.ENTREGADA)
+
+    def test_backoff_exponencial(self, mock_post, _dns):
+        from celery.exceptions import Retry
+        from .tasks import entregar_webhook
+        mock_post.return_value = _respuesta(502)
+        entrega = self._entrega()
+        with patch.object(entregar_webhook, 'retry', side_effect=Retry()) as mock_retry:
+            entregar_webhook.apply(args=[entrega.pk], retries=2)
+        self.assertEqual(mock_retry.call_args[1]['countdown'], 30 * 4)
+
+    def test_error_de_red_reintenta(self, mock_post, _dns):
+        from .tasks import entregar_webhook
+        mock_post.side_effect = [requests.ConnectionError('caído'), _respuesta(200)]
+        entrega = self._entrega()
+        entregar_webhook.apply(args=[entrega.pk])
+        entrega.refresh_from_db()
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.ENTREGADA)
+        self.assertEqual(entrega.intentos, 2)
+
+    def test_4xx_no_reintenta(self, mock_post, _dns):
+        from .tasks import entregar_webhook
+        mock_post.return_value = _respuesta(410)
+        entrega = self._entrega()
+        entregar_webhook.apply(args=[entrega.pk])
+        entrega.refresh_from_db()
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.FALLIDA)
+        self.assertEqual(entrega.ultimo_codigo, 410)
+
+    def test_ssrf_dns_a_ip_privada_bloqueado(self, mock_post, mock_dns):
+        mock_dns.return_value = IP_PRIVADA
+        entrega = self._entrega()
+        self.assertEqual(entregar(entrega.pk), 'FALLIDA')
+        mock_post.assert_not_called()
+        entrega.refresh_from_db()
+        self.assertIn('URL bloqueada', entrega.error)
+
+    def test_destino_desactivado_no_envia(self, mock_post, _dns):
+        entrega = self._entrega()
+        WebhookDestino.objects.filter(pk=self.destino.pk).update(activo=False)
+        self.assertEqual(entregar(entrega.pk), 'FALLIDA')
+        mock_post.assert_not_called()
+
+    def test_entrega_ya_cerrada_no_se_reenvia(self, mock_post, _dns):
+        mock_post.return_value = _respuesta(200)
+        entrega = self._entrega()
+        entregar(entrega.pk)
+        entregar(entrega.pk)
+        self.assertEqual(mock_post.call_count, 1)
+
+
+class SsrfTest(TestCase):
+    def test_ips_no_permitidas(self):
+        for ip in ('127.0.0.1', '10.1.2.3', '192.168.1.1', '172.16.0.1', '169.254.169.254', '::1', '0.0.0.0',
+                   '::ffff:127.0.0.1', '100.64.0.1'):
+            with self.subTest(ip=ip):
+                host = f'[{ip}]' if ':' in ip else ip
+                with self.assertRaises(UrlNoPermitida):
+                    validar_url_destino(f'https://{host}/hook')
+
+    def test_http_y_localhost_rechazados(self):
+        for url in ('http://pms.example.com/hook', 'https://localhost/hook', 'ftp://pms.example.com/'):
+            with self.subTest(url=url), self.assertRaises(UrlNoPermitida):
+                validar_url_destino(url)
+
+    @override_settings(DEBUG=True)
+    def test_debug_permite_http_y_local(self):
+        validar_url_destino('http://localhost:9000/hook')
+        validar_url_destino('http://127.0.0.1/hook')
+
+    @patch('integraciones.salientes.socket.getaddrinfo', return_value=IP_PUBLICA + IP_PRIVADA)
+    def test_basta_una_ip_privada_entre_varias(self, _dns):
+        with self.assertRaises(UrlNoPermitida):
+            validar_url_destino('https://pms.example.com/hook')
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class SenalesSalientesTest(BaseSalientesTest):
+    def test_completar_emite_y_encola_al_confirmar(self, mock_encolar):
+        self._completar()
+        entrega = EntregaWebhook.objects.get()
+        self.assertEqual(entrega.evento, 'inspeccion.completada')
+        self.assertEqual(entrega.destino, self.destino)
+        self.assertEqual(entrega.inspeccion, self.inspeccion)
+        mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
+
+    def test_no_encola_hasta_confirmar_transaccion(self, mock_encolar):
+        self.inspeccion.estado = Inspeccion.Estado.COMPLETADA
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            self.inspeccion.save()
+        mock_encolar.assert_not_called()
+        self.assertEqual(len(callbacks), 1)
+
+    def test_solo_dispara_en_la_transicion(self, mock_encolar):
+        self._completar()
+        # Guardados posteriores ya en COMPLETADA no reemiten
+        with self.captureOnCommitCallbacks(execute=True):
+            self.inspeccion.save()
+            self.inspeccion.operario = self.operario
+            self.inspeccion.save(update_fields=['operario'])
+        self.assertEqual(EntregaWebhook.objects.count(), 1)
+        self.assertEqual(mock_encolar.call_count, 1)
+
+    def test_otros_cambios_de_estado_no_emiten(self, mock_encolar):
+        self.inspeccion.estado = Inspeccion.Estado.EN_PROGRESO
+        with self.captureOnCommitCallbacks(execute=True):
+            self.inspeccion.save()
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+
+    def test_pdf_listo_emite_una_vez(self, mock_encolar):
+        self.inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
+        self.inspeccion.save(update_fields=['pdf_estado'])
+        self.inspeccion.pdf_estado = Inspeccion.PdfEstado.LISTO
+        self.inspeccion.pdf_ruta = 'tmp/x.pdf'
+        with self.captureOnCommitCallbacks(execute=True):
+            self.inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
+            self.inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
+        entrega = EntregaWebhook.objects.get()
+        self.assertEqual(entrega.evento, 'pdf.listo')
+        self.assertNotIn('pdf_url', entrega.payload['data'])
+
+    def test_respeta_eventos_suscritos_y_destinos_inactivos(self, mock_encolar):
+        self.destino.eventos = ['pdf.listo']
+        self.destino.save()
+        WebhookDestino.objects.create(owner=self.admin, url='https://b.example.com', activo=False)
+        self._completar()
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+
+    def test_varios_destinos_comparten_event_id(self, mock_encolar):
+        WebhookDestino.objects.create(owner=self.admin, url='https://b.example.com')
+        self._completar()
+        entregas = list(EntregaWebhook.objects.all())
+        self.assertEqual(len(entregas), 2)
+        self.assertEqual(entregas[0].event_id, entregas[1].event_id)
+        self.assertNotEqual(entregas[0].entrega_id, entregas[1].entrega_id)
+
+    def test_no_notifica_a_destinos_de_otro_tenant(self, mock_encolar):
+        ajeno = WebhookDestino.objects.create(owner=self.admin2, url='https://ajeno.example.com')
+        self._completar()
+        self.assertFalse(EntregaWebhook.objects.filter(destino=ajeno).exists())
+        self.assertEqual(EntregaWebhook.objects.count(), 1)
+
+    def test_fallo_al_emitir_no_rompe_el_guardado(self, mock_encolar):
+        with patch('integraciones.salientes.emitir_evento', side_effect=Exception('boom')):
+            self._completar()
+        self.inspeccion.refresh_from_db()
+        self.assertEqual(self.inspeccion.estado, Inspeccion.Estado.COMPLETADA)
+
+    def test_sin_broker_queda_pendiente(self, mock_encolar):
+        mock_encolar.side_effect = Exception('Redis caído')
+        self._completar()
+        self.assertEqual(EntregaWebhook.objects.get().estado, EntregaWebhook.Estado.PENDIENTE)
+
+    def test_completar_via_api_emite(self, mock_encolar):
+        self.inspeccion.operario = self.operario
+        self.inspeccion.save()
+        self.client.force_authenticate(user=self.operario)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f'/api/v1/inspecciones/{self.inspeccion.pk}/', {'estado': 'COMPLETADA'}, format='json'
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(EntregaWebhook.objects.count(), 1)
+        mock_encolar.assert_called_once()
+
+
+class WebhookDestinoApiTest(BaseIntegracionTest):
+    def test_crear_muestra_secreto_una_sola_vez(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.post(DESTINOS_URL, {'url': 'https://pms.example.com/hook'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(resp.data['secreto'].startswith('whsec_'))
+        self.assertEqual(resp.data['eventos'], ['inspeccion.completada', 'pdf.listo'])
+        destino = WebhookDestino.objects.get()
+        self.assertEqual(destino.owner, self.admin)
+        self.assertEqual(destino.secreto, resp.data['secreto'])
+        for r in (self.client.get(DESTINOS_URL).data[0], self.client.get(f'{DESTINOS_URL}{destino.pk}/').data):
+            self.assertNotIn('secreto', r)
+            self.assertNotIn(destino.secreto, json.dumps(r))
+
+    def test_validaciones_de_url_y_eventos(self):
+        self.client.force_authenticate(user=self.admin)
+        for datos in (
+            {'url': 'http://pms.example.com/hook'},
+            {'url': 'https://127.0.0.1/hook'},
+            {'url': 'https://169.254.169.254/latest'},
+            {'url': 'https://localhost/hook'},
+            {'url': 'https://pms.example.com', 'eventos': []},
+            {'url': 'https://pms.example.com', 'eventos': ['otro.evento']},
+        ):
+            with self.subTest(datos=datos):
+                resp = self.client.post(DESTINOS_URL, datos, format='json')
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(WebhookDestino.objects.count(), 0)
+
+    def test_editar_y_borrar_destino_propio(self):
+        destino = WebhookDestino.objects.create(owner=self.admin, url='https://a.example.com')
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(f'{DESTINOS_URL}{destino.pk}/', {'activo': False, 'eventos': ['pdf.listo']}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        destino.refresh_from_db()
+        self.assertFalse(destino.activo)
+        self.assertEqual(destino.eventos, ['pdf.listo'])
+        resp = self.client.patch(f'{DESTINOS_URL}{destino.pk}/', {'url': 'https://10.0.0.1/'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.client.delete(f'{DESTINOS_URL}{destino.pk}/').status_code, 204)
+        self.assertFalse(WebhookDestino.objects.exists())
+
+    def test_destino_ajeno_devuelve_404(self):
+        ajeno = WebhookDestino.objects.create(owner=self.admin2, url='https://ajeno.example.com')
+        self.client.force_authenticate(user=self.admin)
+        url = f'{DESTINOS_URL}{ajeno.pk}/'
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.patch(url, {'activo': False}, format='json').status_code, 404)
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        ajeno.refresh_from_db()
+        self.assertTrue(ajeno.activo)
+        self.assertEqual(self.client.get(DESTINOS_URL).data, [])
+
+    def test_operario_no_gestiona_destinos(self):
+        self.client.force_authenticate(user=self.operario)
+        self.assertEqual(self.client.get(DESTINOS_URL).status_code, 403)
+        self.assertEqual(self.client.get(ENTREGAS_URL).status_code, 403)
+
+    def test_entregas_solo_del_tenant_y_filtros(self):
+        mio = WebhookDestino.objects.create(owner=self.admin, url='https://a.example.com')
+        ajeno = WebhookDestino.objects.create(owner=self.admin2, url='https://b.example.com')
+        e1 = EntregaWebhook.objects.create(destino=mio, evento='pdf.listo', event_id=uuid4())
+        EntregaWebhook.objects.create(destino=mio, evento='pdf.listo', event_id=uuid4(),
+                                      estado=EntregaWebhook.Estado.FALLIDA)
+        e_ajena = EntregaWebhook.objects.create(destino=ajeno, evento='pdf.listo', event_id=uuid4())
+        self.client.force_authenticate(user=self.admin)
+        self.assertEqual(len(self.client.get(ENTREGAS_URL).data), 2)
+        resp = self.client.get(ENTREGAS_URL, {'estado': 'PENDIENTE'})
+        self.assertEqual([e['id'] for e in resp.data], [e1.pk])
+        self.assertEqual(self.client.get(ENTREGAS_URL, {'destino': ajeno.pk}).data, [])
+        self.assertEqual(self.client.get(ENTREGAS_URL, {'estado': 'X'}).status_code, 400)
+        self.assertEqual(self.client.get(ENTREGAS_URL, {'destino': 'x'}).status_code, 400)
+        url = f'{ENTREGAS_URL}{e_ajena.pk}/reintentar/'
+        self.assertEqual(self.client.post(url).status_code, 404)
+
+    @patch('integraciones.tasks.entregar_webhook.apply_async')
+    def test_reintentar_entrega_fallida(self, mock_encolar):
+        destino = WebhookDestino.objects.create(owner=self.admin, url='https://a.example.com')
+        entrega = EntregaWebhook.objects.create(destino=destino, evento='pdf.listo', event_id=uuid4(),
+                                                estado=EntregaWebhook.Estado.FALLIDA)
+        self.client.force_authenticate(user=self.admin)
+        url = f'{ENTREGAS_URL}{entrega.pk}/reintentar/'
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(url)
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        entrega.refresh_from_db()
+        self.assertEqual(entrega.estado, EntregaWebhook.Estado.PENDIENTE)
+        mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
+        self.assertEqual(self.client.post(url).status_code, status.HTTP_409_CONFLICT)

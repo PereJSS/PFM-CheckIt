@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
-from .models import ApiKey, WebhookEvent
+from .models import EVENTOS_SALIENTES, ApiKey, EntregaWebhook, WebhookDestino, WebhookEvent
+from .salientes import UrlNoPermitida, validar_esquema_url
 from .services import EVENTO_CHECKOUT
 
 
@@ -42,3 +43,40 @@ class PmsWebhookSerializer(serializers.Serializer):
             # Misma normalización que PropiedadSerializer.validate_external_id
             attrs['data']['property_id'] = property_id
         return attrs
+
+
+class WebhookDestinoSerializer(serializers.ModelSerializer):
+    # El secreto nunca se serializa aquí: la vista lo añade solo al crear
+    secreto_prefijo = serializers.CharField(read_only=True)
+    eventos = serializers.ListField(
+        child=serializers.ChoiceField(choices=EVENTOS_SALIENTES),
+        allow_empty=False,
+        required=False,
+    )
+
+    class Meta:
+        model = WebhookDestino
+        fields = ('id', 'nombre', 'url', 'eventos', 'activo', 'secreto_prefijo', 'creado', 'actualizado')
+        read_only_fields = ('id', 'creado', 'actualizado')
+
+    def validate_url(self, valor):
+        try:
+            validar_esquema_url(valor)
+        except UrlNoPermitida as exc:
+            raise serializers.ValidationError(str(exc))
+        return valor
+
+    def validate_eventos(self, valor):
+        # Sin duplicados y en orden estable
+        return [e for e in EVENTOS_SALIENTES if e in valor]
+
+
+class EntregaWebhookSerializer(serializers.ModelSerializer):
+    destino_url = serializers.CharField(source='destino.url', read_only=True)
+
+    class Meta:
+        model = EntregaWebhook
+        fields = (
+            'id', 'destino', 'destino_url', 'evento', 'event_id', 'entrega_id', 'inspeccion',
+            'payload', 'estado', 'intentos', 'ultimo_codigo', 'error', 'creada', 'actualizada', 'entregada',
+        )
