@@ -9,7 +9,7 @@ import {
   setAccessToken,
 } from "./authStorage";
 
-const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
+export const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
 
 const api = axios.create({
   baseURL: apiBaseUrl,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../services/api";
+import IntegracionesPanel from "../components/integraciones/IntegracionesPanel";
 import { clearAuthTokens } from "../services/authStorage";
 
 // Catálogo de estilos/etiquetas para pintar el estado de cada inspección en tabla.
@@ -20,7 +21,12 @@ const ESTADO = {
 
 // Valores iniciales para resetear formularios sin repetir objetos literales.
 const FORM_EMPTY = { propiedad: "", operario: "" };
-const PROP_EMPTY = { nombre: "", direccion: "", descripcion: "" };
+const PROP_EMPTY = {
+  nombre: "",
+  direccion: "",
+  descripcion: "",
+  external_id: "",
+};
 const OP_EMPTY = {
   username: "",
   email: "",
@@ -210,6 +216,7 @@ export default function AdminPage() {
       nombre: p.nombre,
       direccion: p.direccion,
       descripcion: p.descripcion || "",
+      external_id: p.external_id || "",
     });
     setPropErrors({});
     setShowPropForm(true);
@@ -310,6 +317,7 @@ export default function AdminPage() {
             { id: "inspecciones", label: "Inspecciones" },
             { id: "propiedades", label: "Propiedades" },
             { id: "operarios", label: "Operarios" },
+            { id: "integraciones", label: "Integraciones" },
           ].map((t) => (
             <button
               key={t.id}
@@ -590,6 +598,31 @@ export default function AdminPage() {
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
                     />
                   </div>
+                  <div>
+                    <label
+                      htmlFor="prop-external-id"
+                      className="block text-xs font-medium text-slate-500 mb-1"
+                    >
+                      ID externo (PMS)
+                    </label>
+                    <input
+                      id="prop-external-id"
+                      value={propForm.external_id}
+                      onChange={(e) =>
+                        setPropForm((f) => ({
+                          ...f,
+                          external_id: e.target.value,
+                        }))
+                      }
+                      placeholder="LISTING-42"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="mt-1 text-xs text-slate-400">
+                      Identificador de la propiedad en tu PMS. Los webhooks lo
+                      envían como data.property_id.
+                    </p>
+                    {fieldErr(propErrors, "external_id")}
+                  </div>
                 </div>
                 {propErrors.non_field_errors && (
                   <p className="mt-2 text-xs text-red-600">
@@ -637,6 +670,9 @@ export default function AdminPage() {
                       <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                         Descripción
                       </th>
+                      <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                        ID externo
+                      </th>
                       <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide w-28">
                         Acciones
                       </th>
@@ -653,6 +689,9 @@ export default function AdminPage() {
                         </td>
                         <td className="px-5 py-3.5 text-slate-400 italic">
                           {p.descripcion || "—"}
+                        </td>
+                        <td className="px-5 py-3.5 font-mono text-xs text-slate-500">
+                          {p.external_id || "—"}
                         </td>
                         <td className="px-5 py-3.5">
                           <div className="flex gap-2">
@@ -852,6 +891,9 @@ export default function AdminPage() {
             </div>
           </>
         )}
+
+        {/* ── TAB: Integraciones ───────────────────────────────────────────── */}
+        {tab === "integraciones" && <IntegracionesPanel />}
       </main>
     </div>
   );
