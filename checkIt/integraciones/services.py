@@ -12,7 +12,7 @@ EVENTO_CHECKOUT = 'reservation.checkout'
 def _procesar_checkout(evento):
     # Reserva finalizada -> inspección pendiente (sin operario, el admin la asigna)
     external_id = (evento.payload.get('data') or {}).get('property_id')
-    propiedad = Propiedad.objects.filter(owner=evento.owner, external_id=external_id).first()
+    propiedad = Propiedad.objects.filter(owner=evento.owner, external_id__iexact=external_id).first()
     if propiedad is None:
         evento.estado = WebhookEvent.Estado.ERROR
         evento.error = f"No existe ninguna propiedad con external_id '{external_id}'."

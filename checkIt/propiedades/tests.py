@@ -145,6 +145,20 @@ class PropiedadExternalIdTest(APITestCase):
         self._crear('LISTING-1')
         self.assertEqual(self._crear('LISTING-1').status_code, 400)
 
+    def test_external_id_duplicado_con_otras_mayusculas_devuelve_400(self):
+        # El webhook busca sin distinguir mayúsculas: 'listing-1' y 'LISTING-1' serían ambiguos
+        self._crear('LISTING-1')
+        self.assertEqual(self._crear('listing-1').status_code, 400)
+
+    def test_carrera_con_otras_mayusculas_devuelve_400(self):
+        # El índice único de BD también compara sin distinguir mayúsculas
+        from unittest.mock import patch
+        from .serializers import PropiedadSerializer
+        self._crear('LISTING-1')
+        with patch.object(PropiedadSerializer, 'validate_external_id', side_effect=lambda v: v):
+            resp = self._crear('listing-1')
+        self.assertEqual(resp.status_code, 400)
+
     def test_external_id_repetido_en_otro_tenant_permitido(self):
         Propiedad.objects.create(owner=self.admin2, nombre='X', direccion='Y', external_id='LISTING-1')
         self.assertEqual(self._crear('LISTING-1').status_code, 201)

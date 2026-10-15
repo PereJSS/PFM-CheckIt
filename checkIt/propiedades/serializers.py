@@ -14,7 +14,7 @@ class PropiedadSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get('request')
         owner = getattr(request, 'user', None)
-        duplicadas = Propiedad.objects.filter(owner=owner, external_id=value)
+        duplicadas = Propiedad.objects.filter(owner=owner, external_id__iexact=value)
         if self.instance is not None:
             duplicadas = duplicadas.exclude(pk=self.instance.pk)
         if duplicadas.exists():

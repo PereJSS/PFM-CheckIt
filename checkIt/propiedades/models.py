@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Lower
 from django.conf import settings
 
 
@@ -23,10 +24,12 @@ class Propiedad(models.Model):
 
     class Meta:
         constraints = [
+            # Sin distinguir mayúsculas: el webhook busca con iexact y no puede haber ambigüedad
             models.UniqueConstraint(
-                fields=['owner', 'external_id'],
+                'owner',
+                Lower('external_id'),
                 condition=models.Q(external_id__isnull=False),
-                name='propiedad_external_id_unico_por_owner',
+                name='propiedad_external_id_ci_unico_por_owner',
             ),
         ]
 

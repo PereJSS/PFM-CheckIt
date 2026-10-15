@@ -632,7 +632,7 @@ export default function AdminPage() {
                       className="mt-1 text-xs text-slate-400"
                     >
                       Identificador de la propiedad en tu PMS. Los webhooks lo
-                      envían como data.property_id.
+                      envían como data.property_id (no distingue mayúsculas).
                     </p>
                     {propErrors.external_id && (
                       <p

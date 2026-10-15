@@ -239,6 +239,12 @@ class ProcesarEventoTest(BaseIntegracionTest):
         self.assertIn('NO-EXISTE', evento.error)
         self.assertEqual(Inspeccion.objects.count(), 0)
 
+    def test_external_id_no_distingue_mayusculas(self):
+        # La propiedad se guardó como 'LISTING-42'; el PMS la envía en minúsculas
+        evento = procesar_evento(self._evento(property_id='listing-42').pk)
+        self.assertEqual(evento.estado, WebhookEvent.Estado.PROCESADO)
+        self.assertEqual(evento.inspeccion.propiedad, self.prop)
+
     def test_no_usa_propiedad_de_otro_tenant(self):
         # admin2 envía el external_id de una propiedad de admin1: no debe tocarla
         evento = procesar_evento(self._evento(owner=self.admin2).pk)
