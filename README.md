@@ -103,8 +103,8 @@ La sesión de frontend usa sessionStorage (no localStorage):
 
 ```bash
 # Desde la raíz del repo
-python3 -m venv .env
-source .env/bin/activate
+python3 -m venv .venv          # o, sin Python 3.10+ en el sistema: uv venv --python 3.11 .venv
+source .venv/bin/activate
 pip install -r checkIt/requirements.txt
 
 cd checkIt
@@ -175,7 +175,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
 | `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
 | `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
-| `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`, el de Render). **Verificar en producción**: con Cloudflare delante puede ser `2` |
+| `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`). **En Render es `2`** (Cloudflare + balanceador de Render; verificado el 15 oct de 2026). Con un valor bajo, la identidad del throttling es la IP del proxy y los clientes comparten contador; con uno alto, se elude falsificando `X-Forwarded-For` |
 | `WEBHOOK_SALIENTE_TIMEOUT_CONEXION` | No | Timeout de conexión de los webhooks salientes en segundos (por defecto `3`) |
 | `WEBHOOK_SALIENTE_TIMEOUT` | No     | Timeout de lectura de los webhooks salientes en segundos (por defecto `5`) |
 | `WEBHOOK_SALIENTE_MAX_REINTENTOS` | No | Reintentos ante 5xx o error de red (por defecto `5`) |
@@ -419,15 +419,17 @@ El `Procfile` incluye el proceso `beat` como alternativa documentada. Render **n
 
 ### Despliegue en Render
 
-En el dashboard de Render, además del servicio web existente:
+Configuración actual de producción (servicio web con *Root Directory* `checkIt`):
 
-1. Añadir add-on **Redis** y copiar la URL de conexión.
-2. Configurar env var `REDIS_URL` en el servicio web con esa URL.
-3. Crear un segundo servicio **Background Worker** con:
-   - Build command: igual que el web
-   - Start command: `celery -A core worker --loglevel=info`
-   - Misma env var `REDIS_URL`
-4. Para el re-sellado TSA, usa como Start command del worker `celery -A core worker -B --loglevel=info` (una sola instancia) en lugar de crear un tercer servicio de pago.
+| Ajuste | Valor |
+|---|---|
+| Pre-Deploy Command | incluye `python manage.py migrate` |
+| Start Command | `celery -A core worker -B --pool=solo --loglevel=info & gunicorn core.wsgi` |
+| `PYTHON_VERSION` | `3.11.9` (también fijado en `checkIt/.python-version`; la variable tiene prioridad) |
+| `REDIS_URL` | *Internal URL* de un **Key Value** de Render (plan gratuito, misma región que el web) |
+| `NUM_PROXIES` | `2` |
+
+Celery (con beat embebido, `-B`) corre **dentro del servicio web** porque los Background Workers de Render no tienen plan gratuito. `--pool=solo` usa un único proceso para no agotar los 512 MB. Limitaciones: comparte memoria con gunicorn, se duerme con el servicio web en el plan gratuito y, si Celery se cae, nadie lo reinicia hasta el siguiente deploy. Con clientes reales, mover Celery a un **Background Worker** (mismo Build Command y variables, Start Command `celery -A core worker -B --loglevel=info`, **una sola instancia** para no duplicar beat) y dejar el web en `gunicorn core.wsgi`.
 
 ---
 

@@ -222,6 +222,9 @@ CELERY_TIMEZONE = 'UTC'
 # Si Redis no responde, fallar rápido al publicar tareas desde una petición HTTP
 CELERY_BROKER_CONNECTION_TIMEOUT = 2
 CELERY_BROKER_TRANSPORT_OPTIONS = {'socket_connect_timeout': 2}
+# Reintentar la conexión al broker al arrancar el worker (comportamiento actual;
+# explícito para Celery 6, que dejará de usar broker_connection_retry al arrancar)
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 # Celery beat: re-sellado periódico de evidencias sin sello TSA (modo degradado)
 TSA_RESELLO_BATCH_SIZE = config('TSA_RESELLO_BATCH_SIZE', default=20, cast=int)
