@@ -22,3 +22,6 @@ packaging==26.2
 celery==5.3.6
 redis==5.0.1
 drf-spectacular==0.27.2
+# Fotos y PDF en un bucket S3 compatible (Cloudflare R2) si hay AWS_STORAGE_BUCKET_NAME
+django-storages[s3]==1.14.6
+boto3==1.43.114

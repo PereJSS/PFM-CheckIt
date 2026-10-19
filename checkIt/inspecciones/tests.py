@@ -3,6 +3,8 @@ import tempfile
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from PIL import Image
@@ -339,18 +341,25 @@ class ClaimReportTest(APITestCase):
         mock_task.delay.assert_called_once_with(self.insp.pk)
 
     def test_claim_report_returns_file_when_listo(self):
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
-            f.write(b'%PDF-1.4 signed')
-            tmp_path = f.name
-        try:
-            self.insp.pdf_estado = Inspeccion.PdfEstado.LISTO
-            self.insp.pdf_ruta = tmp_path
-            self.insp.save()
-            self.client.force_authenticate(user=self.admin)
-            response = self.client.get(self._url(self.insp.pk))
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-        finally:
-            os.unlink(tmp_path)
+        self.insp.pdf_estado = Inspeccion.PdfEstado.LISTO
+        self.insp.pdf_ruta = default_storage.save('informes/prueba.pdf', ContentFile(b'%PDF-1.4 signed'))
+        self.insp.save()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(b''.join(response.streaming_content), b'%PDF-1.4 signed')
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_regenera_si_el_pdf_ya_no_existe(self, mock_task):
+        # Un PDF de antes de pasar a S3 (ruta local de un disco que ya no existe)
+        mock_task.delay.return_value = MagicMock(id='t')
+        self.insp.pdf_estado = Inspeccion.PdfEstado.LISTO
+        self.insp.pdf_ruta = '/tmp/no-existe/Reclamacion_Fianza_1_Firmada.pdf'
+        self.insp.save()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        mock_task.delay.assert_called_once_with(self.insp.pk)
 
     def test_claim_report_returns_202_when_generando(self):
         self.insp.pdf_estado = Inspeccion.PdfEstado.GENERANDO
@@ -794,10 +803,7 @@ class PdfFirmadoUrlTest(APITestCase):
         prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
         self.insp = Inspeccion.objects.create(propiedad=prop)
         self.otra = Inspeccion.objects.create(propiedad=prop)
-        fd, self.ruta = tempfile.mkstemp(suffix='.pdf')
-        os.write(fd, b'%PDF-1.7 prueba')
-        os.close(fd)
-        self.addCleanup(os.remove, self.ruta)
+        self.ruta = default_storage.save('informes/prueba.pdf', ContentFile(b'%PDF-1.7 prueba'))
         for insp in (self.insp, self.otra):
             insp.pdf_estado = Inspeccion.PdfEstado.LISTO
             insp.pdf_ruta = self.ruta
@@ -849,3 +855,57 @@ class PdfFirmadoUrlTest(APITestCase):
         with limitar(auditoria='2/min'):
             codes = [self.client.get(url).status_code for _ in range(3)]
         self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class AlmacenamientoPdfTest(TestCase):
+    """El PDF y las fotos pasan por el storage de Django (S3/R2 en producción)."""
+
+    def setUp(self):
+        admin = User.objects.create_user(username='admin_alm', password='x', role=User.Role.ADMIN)
+        prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
+        self.insp = Inspeccion.objects.create(propiedad=prop)
+
+    def _generar(self, contenido=b'%PDF-1.7 firmado'):
+        from .tasks import generar_pdf_async
+
+        def firmar(entrada, salida):
+            with open(salida, 'wb') as f:
+                f.write(contenido)
+
+        with patch('inspecciones.services.pdf_signer.firmar_pdf_reclamacion', side_effect=firmar):
+            generar_pdf_async.apply(args=[self.insp.pk]).get()
+        self.insp.refresh_from_db()
+
+    def test_la_tarea_guarda_el_pdf_firmado_en_el_storage(self):
+        self._generar()
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.LISTO)
+        self.assertEqual(self.insp.pdf_ruta, f'informes/Reclamacion_Fianza_{self.insp.pk}_Firmada.pdf')
+        with default_storage.open(self.insp.pdf_ruta, 'rb') as f:
+            self.assertEqual(f.read(), b'%PDF-1.7 firmado')
+
+    def test_no_quedan_ficheros_intermedios_en_disco(self):
+        directorio = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, directorio)
+        with patch('tempfile.tempdir', directorio):
+            self._generar()
+        self.assertEqual(os.listdir(directorio), [])
+
+    def test_regenerar_sustituye_el_pdf_con_el_mismo_nombre(self):
+        self._generar(b'%PDF v1')
+        primero = self.insp.pdf_ruta
+        self._generar(b'%PDF v2')
+        self.assertEqual(self.insp.pdf_ruta, primero)
+        with default_storage.open(primero, 'rb') as f:
+            self.assertEqual(f.read(), b'%PDF v2')
+
+    def test_las_fotos_se_leen_del_storage_y_no_de_una_ruta_local(self):
+        from .services.pdf_generator import generar_informe_base
+        Evidencia.objects.create(inspeccion=self.insp, foto=_make_image(), hash_sha256='a' * 64)
+        fd, ruta = tempfile.mkstemp(suffix='.pdf')
+        os.close(fd)
+        self.addCleanup(os.remove, ruta)
+        generar_informe_base(self.insp, ruta)
+        with open(ruta, 'rb') as f:
+            pdf = f.read()
+        self.assertIn(b'/Subtype /Image', pdf)
+        self.assertNotIn(b'No se pudo cargar la foto', pdf)

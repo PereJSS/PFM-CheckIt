@@ -1,6 +1,8 @@
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -766,7 +768,7 @@ class SenalesSalientesTest(BaseSalientesTest):
         self.inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
         self.inspeccion.save(update_fields=['pdf_estado'])
         self.inspeccion.pdf_estado = Inspeccion.PdfEstado.LISTO
-        self.inspeccion.pdf_ruta = 'tmp/x.pdf'
+        self.inspeccion.pdf_ruta = default_storage.save('informes/x.pdf', ContentFile(b'%PDF-1.7 x'))
         with self.captureOnCommitCallbacks(execute=True):
             self.inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
             self.inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
@@ -777,8 +779,9 @@ class SenalesSalientesTest(BaseSalientesTest):
         self.assertIn('pdf_url_caduca', datos)
         # El enlace funciona sin autenticación
         ruta = datos['pdf_url'].split('/api/v1/', 1)[1]
-        with patch('inspecciones.pdf_publico.os.path.exists', return_value=False):
-            self.assertEqual(self.client.get(f'/api/v1/{ruta}').status_code, 404)
+        resp = self.client.get(f'/api/v1/{ruta}')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b''.join(resp.streaming_content), b'%PDF-1.7 x')
 
     def test_inspeccion_completada_sin_pdf_url(self, mock_encolar):
         self._completar()

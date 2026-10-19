@@ -186,6 +186,12 @@ El proyecto usa python-decouple. Variables disponibles:
 | `WEBHOOK_ENTREGAS_RETENCION_DIAS` | No | Días que se conservan las entregas cerradas (entregadas o fallidas) antes de la purga diaria vía Celery beat (por defecto `90`) |
 | `BACKEND_PUBLIC_URL` | No | URL pública del backend, base de los enlaces absolutos de los webhooks como `pdf_url` (por defecto `https://pfm-checkit.onrender.com`) |
 | `PDF_URL_CADUCIDAD_HORAS` | No | Validez en horas del enlace firmado de descarga del PDF que lleva el webhook `pdf.listo` (por defecto `72`) |
+| `AWS_STORAGE_BUCKET_NAME` | En producción | Bucket S3 compatible (Cloudflare R2) para las fotos y los PDF. **Si está definida, se activa el almacenamiento en el bucket**; si no, se usa el disco local `media/`, que en Render se borra en cada deploy |
+| `AWS_ACCESS_KEY_ID` | Con bucket | Clave de acceso del token de API del bucket (en R2: *Manage R2 API Tokens*, permiso *Object Read & Write* sobre ese bucket) |
+| `AWS_SECRET_ACCESS_KEY` | Con bucket | Secreto de ese token |
+| `AWS_S3_ENDPOINT_URL` | Con R2 | Endpoint S3 de la cuenta: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (sin el nombre del bucket). Vacío en AWS S3 |
+| `AWS_S3_REGION_NAME` | No | Región del bucket (por defecto `auto`, la que usa R2) |
+| `AWS_QUERYSTRING_EXPIRE` | No | Segundos de validez de las URL firmadas de las fotos (por defecto `3600`). El bucket es privado: nunca se sirve una foto sin firma |
 | `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
 | `TSA_RESELLO_BATCH_SIZE` | No        | Máximo de evidencias sin sello que reintenta cada ejecución de la tarea periódica (por defecto `20`) |

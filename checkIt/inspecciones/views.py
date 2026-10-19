@@ -210,11 +210,13 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=403,
             )
 
-        if inspeccion.pdf_estado == Inspeccion.PdfEstado.LISTO and inspeccion.pdf_ruta:
-            import os as _os
-            if _os.path.exists(inspeccion.pdf_ruta):
+        if inspeccion.pdf_estado == Inspeccion.PdfEstado.LISTO:
+            from .services.almacen import abrir_pdf
+            # Si el PDF ya no existe (p. ej. en un disco efímero borrado), se regenera
+            pdf = abrir_pdf(inspeccion)
+            if pdf is not None:
                 return FileResponse(
-                    open(inspeccion.pdf_ruta, 'rb'),
+                    pdf,
                     as_attachment=True,
                     filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf",
                 )

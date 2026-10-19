@@ -73,6 +73,20 @@ def _kv_table(rows, col_widths=None):
     return t
 
 
+def _leer_foto(evidencia):
+    """
+    La foto en memoria, leída a través del storage (S3/R2 no tiene ruta local),
+    o None si no está disponible.
+    """
+    if not evidencia.foto:
+        return None
+    try:
+        with evidencia.foto.open('rb') as f:
+            return io.BytesIO(f.read())
+    except Exception:  # nosec B110 — el informe se genera igual, con un aviso en su lugar
+        return None
+
+
 def _evidence_thumbnail(evidence, max_side=2.5 * cm):
     """Devuelve un Image reportlab si el archivo es una imagen, o un placeholder de texto."""
     try:
@@ -224,10 +238,11 @@ def generate_claim_pdf(inspection) -> bytes:
     return buffer.getvalue()
 
 
-def generar_informe_base(inspeccion):
+def generar_informe_base(inspeccion, output_path=None):
     """Genera el PDF base de la reclamación usando los campos reales del modelo."""
-    os.makedirs('tmp', exist_ok=True)
-    output_path = f"tmp/base_reclamacion_{inspeccion.id}.pdf"
+    if output_path is None:
+        os.makedirs('tmp', exist_ok=True)
+        output_path = f"tmp/base_reclamacion_{inspeccion.id}.pdf"
 
     s = _styles()
     buffer = io.BytesIO()
@@ -273,14 +288,14 @@ def generar_informe_base(inspeccion):
             ))
             story.append(Paragraph(ev.descripcion or 'Sin descripción', s['small']))
 
-            try:
-                image_path = ev.foto.path
-                if image_path and os.path.exists(image_path):
-                    story.append(Image(image_path, width=6 * cm, height=4.5 * cm, kind='proportional'))
-                else:
-                    story.append(Paragraph('No se pudo cargar la foto en el informe (archivo no disponible).', s['small']))
-            except Exception:
-                story.append(Paragraph('No se pudo cargar la foto en el informe (formato no compatible).', s['small']))
+            imagen = _leer_foto(ev)
+            if imagen is None:
+                story.append(Paragraph('No se pudo cargar la foto en el informe (archivo no disponible).', s['small']))
+            else:
+                try:
+                    story.append(Image(imagen, width=6 * cm, height=4.5 * cm, kind='proportional'))
+                except Exception:
+                    story.append(Paragraph('No se pudo cargar la foto en el informe (formato no compatible).', s['small']))
 
             story.append(Spacer(1, 0.4 * cm))
 

@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 import os
 from pathlib import Path
+import sys
 from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -152,6 +153,36 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Almacenamiento de fotos y PDF. Con AWS_STORAGE_BUCKET_NAME se usa un bucket S3
+# compatible (Cloudflare R2): el disco de Render es efímero y se borra en cada deploy.
+# Sin él (desarrollo), el disco local en MEDIA_ROOT.
+AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='')
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+}
+if AWS_STORAGE_BUCKET_NAME:
+    STORAGES['default'] = {
+        'BACKEND': 'storages.backends.s3.S3Storage',
+        'OPTIONS': {
+            'bucket_name': AWS_STORAGE_BUCKET_NAME,
+            'access_key': config('AWS_ACCESS_KEY_ID'),
+            'secret_key': config('AWS_SECRET_ACCESS_KEY'),
+            'endpoint_url': config('AWS_S3_ENDPOINT_URL', default=None),
+            'region_name': config('AWS_S3_REGION_NAME', default='auto'),
+            'signature_version': 's3v4',
+            # Bucket privado: las URL de las fotos van firmadas y caducan
+            'default_acl': None,
+            'querystring_auth': True,
+            'querystring_expire': config('AWS_QUERYSTRING_EXPIRE', default=3600, cast=int),
+            # Nunca sobrescribir una evidencia: si el nombre existe, se añade un sufijo
+            'file_overwrite': False,
+        },
+    }
+# Los tests no escriben en media/ ni necesitan red
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    STORAGES['default'] = {'BACKEND': 'django.core.files.storage.InMemoryStorage'}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field

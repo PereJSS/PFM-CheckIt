@@ -2,7 +2,6 @@
 Descarga pública del PDF firmado mediante una URL firmada y con caducidad.
 La usa el webhook `pdf.listo`: el PMS no tiene JWT para claim-report.
 """
-import os
 from datetime import timedelta
 
 from django.conf import settings
@@ -18,6 +17,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Inspeccion
+from .services.almacen import abrir_pdf
 
 # Salt propio: un token de auditoría u otro uso no vale para descargar PDFs
 PDF_URL_SALT = 'checkit.inspeccion.pdf'
@@ -63,10 +63,11 @@ class InformePdfPublicoView(APIView):
         except BadSignature:
             raise Http404
         inspeccion = Inspeccion.objects.filter(pk=inspeccion_id, pdf_estado=Inspeccion.PdfEstado.LISTO).first()
-        if inspeccion is None or not inspeccion.pdf_ruta or not os.path.exists(inspeccion.pdf_ruta):
+        pdf = abrir_pdf(inspeccion) if inspeccion is not None else None
+        if pdf is None:
             raise Http404
         return FileResponse(
-            open(inspeccion.pdf_ruta, 'rb'),
+            pdf,
             as_attachment=True,
             filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf",
             content_type='application/pdf',
