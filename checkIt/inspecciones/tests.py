@@ -620,6 +620,26 @@ class ResellarEvidenciasPendientesTest(TestCase):
         self.assertEqual(mock_tsa.call_count, 2)
         self.assertEqual(Evidencia.objects.filter(tsa_token__isnull=False).count(), 2)
 
+    @patch('inspecciones.tasks.solicitar_sello_tiempo', return_value=None)
+    def test_rota_las_que_fallan(self, mock_tsa):
+        # Con lote 2 y tres evidencias que siempre fallan, la segunda pasada
+        # empieza por la que no se intentó en la primera
+        evs = [self._evidencia(hash_sha256=str(i) * 64) for i in range(3)]
+        from .tasks import resellar_evidencias_pendientes
+        with self.settings(TSA_RESELLO_BATCH_SIZE=2, TSA_RESELLO_PAUSA_SEG=0, TSA_RESELLO_MAX_FALLOS=10):
+            resellar_evidencias_pendientes()
+            self.assertEqual([c.args[0] for c in mock_tsa.call_args_list], ['0' * 64, '1' * 64])
+            mock_tsa.reset_mock()
+            resellar_evidencias_pendientes()
+        self.assertEqual(mock_tsa.call_args_list[0].args[0], '2' * 64)
+        for ev in evs:
+            ev.refresh_from_db()
+            self.assertIsNotNone(ev.tsa_ultimo_intento)
+
+    def test_indice_parcial_de_pendientes(self):
+        nombres = {i.name for i in Evidencia._meta.indexes}
+        self.assertIn('evidencia_tsa_pendiente_idx', nombres)
+
     def test_beat_schedule_configurado(self):
         from django.conf import settings
         entrada = settings.CELERY_BEAT_SCHEDULE['resellar-evidencias-pendientes']
@@ -763,3 +783,69 @@ class AuditThrottleTest(APITestCase):
     def test_audit_default_rate_configured(self):
         from rest_framework.settings import api_settings
         self.assertIn('auditoria', api_settings.DEFAULT_THROTTLE_RATES)
+
+
+class PdfFirmadoUrlTest(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.addCleanup(cache.clear)
+        admin = User.objects.create_user(username='admin_pdf', password='x', role=User.Role.ADMIN)
+        prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
+        self.insp = Inspeccion.objects.create(propiedad=prop)
+        self.otra = Inspeccion.objects.create(propiedad=prop)
+        fd, self.ruta = tempfile.mkstemp(suffix='.pdf')
+        os.write(fd, b'%PDF-1.7 prueba')
+        os.close(fd)
+        self.addCleanup(os.remove, self.ruta)
+        for insp in (self.insp, self.otra):
+            insp.pdf_estado = Inspeccion.PdfEstado.LISTO
+            insp.pdf_ruta = self.ruta
+            insp.save(update_fields=['pdf_estado', 'pdf_ruta'])
+
+    def _url(self, inspeccion):
+        from .pdf_publico import url_pdf_firmada
+        return url_pdf_firmada(inspeccion.pk)
+
+    @override_settings(BACKEND_PUBLIC_URL='https://api.example.com/')
+    def test_url_absoluta_descarga_el_pdf_sin_autenticacion(self):
+        url = self._url(self.insp)
+        self.assertTrue(url.startswith('https://api.example.com/api/v1/informes/'))
+        resp = self.client.get(url.removeprefix('https://api.example.com'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b''.join(resp.streaming_content), b'%PDF-1.7 prueba')
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+
+    def test_token_manipulado_404(self):
+        from .pdf_publico import token_pdf
+        token = token_pdf(self.insp.pk)
+        # Cambiar el id conservando la firma no sirve para otra inspección
+        falso = f'{self.otra.pk}' + token[len(str(self.insp.pk)):]
+        self.assertEqual(self.client.get(f'/api/v1/informes/{falso}/').status_code, 404)
+        self.assertEqual(self.client.get('/api/v1/informes/basura/').status_code, 404)
+
+    def test_token_de_auditoria_no_vale_para_pdf(self):
+        # Salt distinto: un token de otro uso firmado con la misma clave no sirve
+        from django.core.signing import TimestampSigner
+        ajeno = TimestampSigner(salt='checkit.evidence.audit').sign(str(self.insp.pk))
+        self.assertEqual(self.client.get(f'/api/v1/informes/{ajeno}/').status_code, 404)
+
+    def test_caducado_410(self):
+        from .pdf_publico import token_pdf
+        token = token_pdf(self.insp.pk)
+        with override_settings(PDF_URL_CADUCIDAD_HORAS=0):
+            with patch('django.core.signing.time.time', return_value=__import__('time').time() + 10):
+                resp = self.client.get(f'/api/v1/informes/{token}/')
+        self.assertEqual(resp.status_code, 410)
+
+    def test_pdf_no_disponible_404(self):
+        from .pdf_publico import token_pdf
+        Inspeccion.objects.filter(pk=self.insp.pk).update(pdf_estado=Inspeccion.PdfEstado.ERROR)
+        self.assertEqual(self.client.get(f'/api/v1/informes/{token_pdf(self.insp.pk)}/').status_code, 404)
+
+    def test_throttle(self):
+        from .pdf_publico import token_pdf
+        url = f'/api/v1/informes/{token_pdf(self.insp.pk)}/'
+        with limitar(auditoria='2/min'):
+            codes = [self.client.get(url).status_code for _ in range(3)]
+        self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)

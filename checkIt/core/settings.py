@@ -204,6 +204,11 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
+# URL pública del backend: base de los enlaces absolutos que salen en los webhooks
+BACKEND_PUBLIC_URL = config('BACKEND_PUBLIC_URL', default='https://pfm-checkit.onrender.com')
+# Validez del enlace de descarga del PDF que se envía en el webhook pdf.listo
+PDF_URL_CADUCIDAD_HORAS = config('PDF_URL_CADUCIDAD_HORAS', default=72, cast=int)
+
 CORS_ALLOWED_ORIGINS = [
     'https://pfm-check-it.vercel.app',
 ]

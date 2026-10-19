@@ -42,6 +42,18 @@ class Evidencia(models.Model):
     hash_sha256 = models.CharField(max_length=64, blank=True, null=True, verbose_name="Hash SHA-256")
     tsa_timestamp = models.DateTimeField(blank=True, null=True, verbose_name="Timestamp TSA")
     tsa_token = models.BinaryField(blank=True, null=True, verbose_name="Token TSA (.tsr)")
+    # Último intento de re-sellado (tarea periódica): rota la cola de pendientes
+    tsa_ultimo_intento = models.DateTimeField(blank=True, null=True, editable=False)
+
+    class Meta:
+        indexes = [
+            # Solo las pendientes de sello: el índice no crece con las ya selladas
+            models.Index(
+                fields=['tsa_ultimo_intento', 'id'],
+                name='evidencia_tsa_pendiente_idx',
+                condition=models.Q(tsa_token__isnull=True),
+            ),
+        ]
 
     def __str__(self):
         return f"Evidencia de {self.inspeccion} tomada por {self.inspeccion.operario.username if self.inspeccion.operario else 'Sin operario'} el {self.fecha_captura.strftime('%Y-%m-%d %H:%M:%S')}"

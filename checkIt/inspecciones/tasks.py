@@ -43,14 +43,13 @@ def _setting_num(nombre, defecto, tipo=int, minimo=0):
         return defecto
 
 
-# TODO: rotar por "último intento" para que evidencias con hash problemático no
-# bloqueen el principio de la cola, y añadir un índice parcial (hash no nulo y
-# tsa_token nulo) cuando el volumen lo justifique.
 @shared_task(time_limit=300, soft_time_limit=270)
 def resellar_evidencias_pendientes():
     """Reintenta el sellado TSA de evidencias guardadas en modo degradado (sin tsa_token)."""
     from celery.exceptions import SoftTimeLimitExceeded
     from django.core.cache import cache
+    from django.db.models import F
+    from django.utils import timezone
     from .models import Evidencia
 
     if not cache.add(RESELLO_LOCK_KEY, 1, RESELLO_LOCK_TIMEOUT):
@@ -62,16 +61,19 @@ def resellar_evidencias_pendientes():
         max_fallos = _setting_num('TSA_RESELLO_MAX_FALLOS', 3, int, 1)
         pausa = _setting_num('TSA_RESELLO_PAUSA_SEG', 1.0, float, 0.0)
 
+        # Primero las nunca intentadas y luego las de intento más antiguo: unas
+        # pocas evidencias que siempre fallan no bloquean el resto de la cola
         pendientes = list(
             Evidencia.objects.filter(hash_sha256__isnull=False, tsa_token__isnull=True)
             .exclude(hash_sha256='')
-            .order_by('pk')[:lote]
+            .order_by(F('tsa_ultimo_intento').asc(nulls_first=True), 'pk')[:lote]
         )
         procesadas = selladas = fallos_seguidos = 0
         for n, evidencia in enumerate(pendientes):
             if n and pausa:
                 time.sleep(pausa)
             procesadas += 1
+            Evidencia.objects.filter(pk=evidencia.pk).update(tsa_ultimo_intento=timezone.now())
             try:
                 tsa_data = solicitar_sello_tiempo(evidencia.hash_sha256)
             except SoftTimeLimitExceeded:
