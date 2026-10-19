@@ -23,8 +23,11 @@ import {
   mensajeError,
 } from "./estilos";
 
-// Gestión de API keys (GET/POST /integraciones/api-keys/, DELETE .../<id>/ para revocar).
+// Gestión de API keys (GET/POST /integraciones/api-keys/, DELETE .../<id>/ para
+// revocar y DELETE .../<id>/eliminar/ para borrar una ya revocada).
+// Las revocadas se ocultan por defecto (?revocadas=0).
 export default function ApiKeysSection() {
+  const [mostrarRevocadas, setMostrarRevocadas] = useState(false);
   const {
     datos: claves,
     cargando,
@@ -32,7 +35,7 @@ export default function ApiKeysSection() {
     recargar,
   } = useListado(
     "/integraciones/api-keys/",
-    "",
+    mostrarRevocadas ? "" : "revocadas=0",
     "No se pudieron cargar las API keys.",
   );
 
@@ -41,6 +44,7 @@ export default function ApiKeysSection() {
   const [formErrors, setFormErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [revocando, setRevocando] = useState(null);
+  const [eliminando, setEliminando] = useState(null);
   const [accionError, setAccionError] = useState(null);
   const botonNuevaRef = useRef(null);
 
@@ -87,6 +91,27 @@ export default function ApiKeysSection() {
     }
   };
 
+  const handleEliminar = async (k) => {
+    if (
+      !window.confirm(
+        `¿Eliminar la API key revocada "${k.nombre}"? Desaparecerá del listado; los eventos que recibió se conservan.`,
+      )
+    )
+      return;
+    setAccionError(null);
+    setEliminando(k.id);
+    try {
+      await api.delete(`/integraciones/api-keys/${k.id}/eliminar/`);
+      recargar();
+    } catch (err) {
+      setAccionError(
+        mensajeError(err, "No se pudo eliminar la API key. Inténtalo de nuevo."),
+      );
+    } finally {
+      setEliminando(null);
+    }
+  };
+
   const cerrarAviso = () => {
     setClaveNueva(null);
     botonNuevaRef.current?.focus();
@@ -107,6 +132,15 @@ export default function ApiKeysSection() {
           <p className="mt-1 text-sm text-slate-500">
             Claves con las que tu PMS se autentica al enviar eventos a CheckIt.
           </p>
+          <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-500">
+            <input
+              type="checkbox"
+              checked={mostrarRevocadas}
+              onChange={(e) => setMostrarRevocadas(e.target.checked)}
+              className="rounded border-slate-300"
+            />
+            Mostrar revocadas
+          </label>
         </div>
         <button
           ref={botonNuevaRef}
@@ -188,7 +222,9 @@ export default function ApiKeysSection() {
         ) : claves.length === 0 ? (
           !error && (
             <p className={VACIO}>
-              Aún no tienes API keys. Crea una para conectar tu PMS.
+              {mostrarRevocadas
+                ? "Aún no tienes API keys. Crea una para conectar tu PMS."
+                : "No tienes API keys activas. Crea una para conectar tu PMS."}
             </p>
           )
         ) : (
@@ -227,7 +263,17 @@ export default function ApiKeysSection() {
                       </span>
                     </td>
                     <td className={TD}>
-                      {!k.revocada && (
+                      {k.revocada ? (
+                        <button
+                          type="button"
+                          onClick={() => handleEliminar(k)}
+                          disabled={eliminando === k.id}
+                          aria-label={`Eliminar la API key revocada ${k.nombre}`}
+                          className={LINK_PELIGRO}
+                        >
+                          {eliminando === k.id ? "Eliminando…" : "Eliminar"}
+                        </button>
+                      ) : (
                         <button
                           type="button"
                           onClick={() => handleRevocar(k)}
