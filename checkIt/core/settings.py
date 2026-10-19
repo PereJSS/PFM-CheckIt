@@ -177,6 +177,8 @@ REST_FRAMEWORK = {
     # Solo se aplica a las vistas con throttle_scope
     'DEFAULT_THROTTLE_RATES': {
         'webhooks': config('WEBHOOK_THROTTLE_RATE', default='120/min'),
+        # Vistas de gestión del panel de integraciones (por usuario autenticado)
+        'integraciones': config('INTEGRACIONES_THROTTLE_RATE', default='120/min'),
         'auditoria': config('AUDIT_THROTTLE_RATE', default='30/min'),
         'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
         'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
@@ -194,6 +196,10 @@ SPECTACULAR_SETTINGS = {
     'SERVE_INCLUDE_SCHEMA': False,
     # Documentación pública a propósito: la consumen los integradores de PMS
     'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
+    # Varios modelos tienen un campo `estado` con choices distintos: nombres explícitos
+    'ENUM_NAME_OVERRIDES': {
+        'EstadoEventoEnum': 'integraciones.models.WebhookEvent.Estado',
+    },
 }
 
 # Configuración de los tokens JWT
@@ -247,6 +253,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'integraciones.tasks.reencolar_entregas_atascadas',
         'schedule': 300.0,
         'options': {'expires': 300},
+    },
+    # Webhooks salientes: purga diaria de entregas cerradas (WEBHOOK_ENTREGAS_RETENCION_DIAS)
+    'purgar-entregas-webhook': {
+        'task': 'integraciones.tasks.purgar_entregas_webhook',
+        'schedule': 24 * 3600.0,
+        'options': {'expires': 3600},
     },
 }
 

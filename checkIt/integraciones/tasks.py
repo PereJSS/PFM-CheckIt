@@ -48,3 +48,11 @@ def reencolar_entregas_atascadas():
     from .salientes import reencolar_atascadas
 
     return reencolar_atascadas()
+
+
+@shared_task(time_limit=600, soft_time_limit=540)
+def purgar_entregas_webhook():
+    """Tarea periódica (Celery beat): borra las entregas cerradas más antiguas que la retención."""
+    from .salientes import purgar_entregas_antiguas
+
+    return purgar_entregas_antiguas()

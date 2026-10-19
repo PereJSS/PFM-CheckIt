@@ -327,6 +327,33 @@ class ApiKeyGestionTest(BaseIntegracionTest):
         self.api_key.refresh_from_db()
         self.assertFalse(self.api_key.revocada)
 
+    def test_filtrar_claves_revocadas(self):
+        revocada, _ = ApiKey.generar(self.admin, 'Vieja')
+        ApiKey.objects.filter(pk=revocada.pk).update(revocada=True)
+        self.client.force_authenticate(user=self.admin)
+        self.assertEqual([k['nombre'] for k in self.client.get(API_KEYS_URL, {'revocadas': '0'}).data], ['Guesty'])
+        self.assertEqual([k['nombre'] for k in self.client.get(API_KEYS_URL, {'revocadas': '1'}).data], ['Vieja'])
+        self.assertEqual(len(self.client.get(API_KEYS_URL).data), 2)
+        self.assertEqual(self.client.get(API_KEYS_URL, {'revocadas': 'x'}).status_code, 400)
+
+    def test_eliminar_clave_revocada_conserva_sus_eventos(self):
+        evento = WebhookEvent.objects.create(owner=self.admin, api_key=self.api_key, event_id='e', tipo='t')
+        self.client.force_authenticate(user=self.admin)
+        url = f'{API_KEYS_URL}{self.api_key.pk}/eliminar/'
+        # Una clave activa no se borra: primero hay que revocarla
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_409_CONFLICT)
+        self.client.delete(f'{API_KEYS_URL}{self.api_key.pk}/')
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ApiKey.objects.filter(pk=self.api_key.pk).exists())
+        evento.refresh_from_db()
+        self.assertIsNone(evento.api_key)
+
+    def test_eliminar_clave_ajena_devuelve_404(self):
+        ApiKey.objects.filter(pk=self.api_key.pk).update(revocada=True)
+        self.client.force_authenticate(user=self.admin2)
+        self.assertEqual(self.client.delete(f'{API_KEYS_URL}{self.api_key.pk}/eliminar/').status_code, 404)
+        self.assertTrue(ApiKey.objects.filter(pk=self.api_key.pk).exists())
+
     def test_eventos_solo_del_tenant(self):
         WebhookEvent.objects.create(owner=self.admin, event_id='mio', tipo='t')
         WebhookEvent.objects.create(owner=self.admin2, event_id='ajeno', tipo='t')
@@ -337,6 +364,69 @@ class ApiKeyGestionTest(BaseIntegracionTest):
     def test_operario_no_ve_eventos(self):
         self.client.force_authenticate(user=self.operario)
         self.assertEqual(self.client.get(EVENTOS_URL).status_code, 403)
+
+
+class EventosApiTest(BaseIntegracionTest):
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(user=self.admin)
+
+    def _evento(self, event_id, **campos):
+        campos.setdefault('tipo', 'reservation.checkout')
+        return WebhookEvent.objects.create(owner=self.admin, event_id=event_id, **campos)
+
+    def test_filtros_en_servidor(self):
+        self._evento('a', estado=WebhookEvent.Estado.ERROR, proveedor='guesty')
+        self._evento('b', estado=WebhookEvent.Estado.PROCESADO, proveedor='guesty')
+        self._evento('c', estado=WebhookEvent.Estado.ERROR, proveedor='hostaway', tipo='otro')
+        ids = lambda **q: [e['event_id'] for e in self.client.get(EVENTOS_URL, q).data]  # noqa: E731
+        self.assertEqual(ids(estado='ERROR'), ['c', 'a'])
+        self.assertEqual(ids(estado='ERROR', proveedor='guesty'), ['a'])
+        self.assertEqual(ids(tipo='otro'), ['c'])
+        self.assertEqual(ids(event_id='b'), ['b'])
+        self.assertEqual(self.client.get(EVENTOS_URL, {'estado': 'NOPE'}).status_code, 400)
+
+    def test_paginacion_con_antes(self):
+        eventos = [self._evento(f'e{n}') for n in range(55)]
+        primera = self.client.get(EVENTOS_URL).data
+        self.assertEqual(len(primera), 50)
+        self.assertEqual(primera[0]['id'], eventos[-1].pk)
+        resto = self.client.get(EVENTOS_URL, {'antes': primera[-1]['id']}).data
+        self.assertEqual([e['id'] for e in resto], [e.pk for e in reversed(eventos[:5])])
+        self.assertEqual(self.client.get(EVENTOS_URL, {'antes': 'x'}).status_code, 400)
+
+    def test_detalle_expone_payload_y_api_key(self):
+        evento = self._evento('d', api_key=self.api_key, payload={'data': {'property_id': 'X'}})
+        resp = self.client.get(f'{EVENTOS_URL}{evento.pk}/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['payload'], {'data': {'property_id': 'X'}})
+        self.assertEqual(resp.data['api_key'], {'id': self.api_key.pk, 'nombre': 'Guesty',
+                                                'prefijo': self.api_key.prefijo})
+        # El listado sigue siendo ligero
+        self.assertNotIn('payload', self.client.get(EVENTOS_URL).data[0])
+
+    def test_detalle_ajeno_404(self):
+        ajeno = WebhookEvent.objects.create(owner=self.admin2, event_id='x', tipo='t')
+        self.assertEqual(self.client.get(f'{EVENTOS_URL}{ajeno.pk}/').status_code, 404)
+        self.assertEqual(self.client.post(f'{EVENTOS_URL}{ajeno.pk}/reprocesar/').status_code, 404)
+
+    @patch('integraciones.tasks.procesar_evento_pms.apply_async')
+    def test_reprocesar_evento_en_error(self, mock_encolar):
+        evento = self._evento('r', estado=WebhookEvent.Estado.ERROR, error='sin propiedad',
+                              payload={'data': {'property_id': 'LISTING-42'}})
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(f'{EVENTOS_URL}{evento.pk}/reprocesar/')
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_encolar.assert_called_once_with(args=[evento.pk], retry=False)
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, WebhookEvent.Estado.RECIBIDO)
+        self.assertEqual(evento.error, '')
+
+    @patch('integraciones.tasks.procesar_evento_pms.apply_async')
+    def test_reprocesar_evento_resuelto_da_409(self, mock_encolar):
+        evento = self._evento('p', estado=WebhookEvent.Estado.PROCESADO)
+        self.assertEqual(self.client.post(f'{EVENTOS_URL}{evento.pk}/reprocesar/').status_code, 409)
+        mock_encolar.assert_not_called()
 
 
 # --- Webhooks salientes ---
@@ -682,7 +772,17 @@ class SenalesSalientesTest(BaseSalientesTest):
             self.inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
         entrega = EntregaWebhook.objects.get()
         self.assertEqual(entrega.evento, 'pdf.listo')
-        self.assertNotIn('pdf_url', entrega.payload['data'])
+        datos = entrega.payload['data']
+        self.assertIn('/api/v1/informes/', datos['pdf_url'])
+        self.assertIn('pdf_url_caduca', datos)
+        # El enlace funciona sin autenticación
+        ruta = datos['pdf_url'].split('/api/v1/', 1)[1]
+        with patch('inspecciones.pdf_publico.os.path.exists', return_value=False):
+            self.assertEqual(self.client.get(f'/api/v1/{ruta}').status_code, 404)
+
+    def test_inspeccion_completada_sin_pdf_url(self, mock_encolar):
+        self._completar()
+        self.assertNotIn('pdf_url', EntregaWebhook.objects.get().payload['data'])
 
     def test_respeta_eventos_suscritos_y_destinos_inactivos(self, mock_encolar):
         self.destino.eventos = ['pdf.listo']
@@ -885,3 +985,87 @@ class WebhookDestinoApiTest(BaseIntegracionTest):
         mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
         # Ahora es PENDIENTE reciente: no se puede reintentar de nuevo
         self.assertEqual(self.client.post(url).status_code, status.HTTP_409_CONFLICT)
+
+
+@patch('integraciones.salientes.socket.getaddrinfo', return_value=IP_PUBLICA)
+class AdaptadorIpFijadaTest(TestCase):
+    """
+    Guarda contra actualizaciones de `requests`: el anti-rebinding depende de que
+    HTTPAdapter llame a build_connection_pool_key_attributes al abrir la conexión.
+    Si deja de hacerlo, la conexión volvería a resolver el nombre por su cuenta.
+    """
+
+    def test_la_conexion_real_usa_la_ip_validada(self, mock_dns):
+        with patch(URLOPEN, autospec=True, side_effect=_respuestas(200)) as mock_urlopen:
+            with _sesion() as sesion:
+                sesion.post('https://pms.example.com/hook', data=b'{}', timeout=1, allow_redirects=False)
+        mock_dns.assert_called_once()
+        pool = mock_urlopen.call_args.args[0]
+        self.assertEqual(pool.host, '93.184.216.34', 'requests ya no llama al hook del adaptador')
+        self.assertEqual(pool.conn_kw.get('server_hostname'), 'pms.example.com')
+        self.assertEqual(pool.assert_hostname, 'pms.example.com')
+
+
+class ChecksTest(TestCase):
+    def _errores(self):
+        from .checks import check_permitir_local
+        return check_permitir_local(None)
+
+    @override_settings(DEBUG=False)
+    @patch('integraciones.salientes.PERMITIR_LOCAL', True)
+    def test_avisa_si_permitir_local_en_produccion(self):
+        avisos = self._errores()
+        self.assertEqual([a.id for a in avisos], ['integraciones.W001'])
+
+    @override_settings(DEBUG=True)
+    @patch('integraciones.salientes.PERMITIR_LOCAL', True)
+    def test_sin_aviso_en_desarrollo(self):
+        self.assertEqual(self._errores(), [])
+
+    @override_settings(DEBUG=False)
+    def test_sin_aviso_por_defecto(self):
+        self.assertEqual(self._errores(), [])
+
+
+class ThrottleGestionTest(BaseIntegracionTest):
+    def test_vistas_de_gestion_limitadas(self):
+        from rest_framework.settings import api_settings
+        from rest_framework.throttling import ScopedRateThrottle
+        rates = {**api_settings.DEFAULT_THROTTLE_RATES, 'integraciones': '2/min'}
+        self.client.force_authenticate(user=self.admin)
+        for url in (API_KEYS_URL, EVENTOS_URL, DESTINOS_URL, ENTREGAS_URL):
+            cache.clear()
+            with self.subTest(url=url), patch.object(ScopedRateThrottle, 'THROTTLE_RATES', rates):
+                self.client.get(url)
+                self.client.get(url)
+                self.assertEqual(self.client.get(url).status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_scope_configurado(self):
+        from rest_framework.settings import api_settings
+        self.assertIn('integraciones', api_settings.DEFAULT_THROTTLE_RATES)
+
+
+class PurgaEntregasTest(BaseSalientesTest):
+    def _entrega(self, dias, estado):
+        entrega = EntregaWebhook.objects.create(destino=self.destino, evento='pdf.listo', event_id=uuid4(),
+                                                estado=estado)
+        EntregaWebhook.objects.filter(pk=entrega.pk).update(creada=timezone.now() - timedelta(days=dias))
+        return entrega
+
+    def test_borra_solo_cerradas_antiguas(self):
+        from .salientes import purgar_entregas_antiguas
+        E = EntregaWebhook.Estado
+        viejas = [self._entrega(100, E.ENTREGADA), self._entrega(100, E.FALLIDA)]
+        quedan = [self._entrega(100, E.PENDIENTE), self._entrega(10, E.ENTREGADA)]
+        self.assertEqual(purgar_entregas_antiguas(dias=90, lote=1), 2)
+        restantes = set(EntregaWebhook.objects.values_list('pk', flat=True))
+        self.assertEqual(restantes, {e.pk for e in quedan})
+        self.assertFalse(restantes & {e.pk for e in viejas})
+
+    def test_tarea_periodica_registrada(self):
+        from django.conf import settings
+        from .tasks import purgar_entregas_webhook
+        tareas = {c['task'] for c in settings.CELERY_BEAT_SCHEDULE.values()}
+        self.assertIn('integraciones.tasks.purgar_entregas_webhook', tareas)
+        self._entrega(200, EntregaWebhook.Estado.ENTREGADA)
+        self.assertEqual(purgar_entregas_webhook.apply().get(), 1)

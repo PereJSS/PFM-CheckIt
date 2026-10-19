@@ -6,4 +6,4 @@ class IntegracionesConfig(AppConfig):
     name = 'integraciones'
 
     def ready(self):
-        from . import signals  # noqa: F401  (conecta los receptores de webhooks salientes)
+        from . import checks, signals  # noqa: F401  (system checks y receptores de webhooks salientes)

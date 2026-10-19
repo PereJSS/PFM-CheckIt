@@ -13,12 +13,13 @@ from rest_framework import serializers
 
 from .serializers import (
     ApiKeySerializer, EntregaWebhookSerializer, PmsWebhookSerializer, WebhookDestinoSerializer,
-    WebhookEventListSerializer,
+    WebhookEventDetalleSerializer, WebhookEventListSerializer,
 )
 from .views import (
-    ApiKeyListCreateView, ApiKeyRevokeView, EntregaWebhookListView, EntregaWebhookReintentarView,
+    ApiKeyEliminarView, ApiKeyListCreateView, ApiKeyRevokeView, EntregaWebhookListView, EntregaWebhookReintentarView,
     PmsWebhookView, WebhookDestinoDetailView, WebhookDestinoListCreateView,
-    WebhookDestinoRotarSecretoView, WebhookEventListView,
+    WebhookDestinoRotarSecretoView, WebhookEventDetailView, WebhookEventListView,
+    WebhookEventReprocesarView,
 )
 
 
@@ -54,6 +55,8 @@ _ApiKeyCreada = inline_serializer('ApiKeyCreada', {
     'clave': serializers.CharField(help_text='Solo se muestra en esta respuesta.'),
 })
 
+_ErrorConflicto = inline_serializer('ErrorConflicto', {'error': serializers.CharField()})
+
 extend_schema_view(post=extend_schema(
     summary='Recibir evento de un PMS',
     request=PmsWebhookSerializer,
@@ -61,7 +64,12 @@ extend_schema_view(post=extend_schema(
 ))(PmsWebhookView)
 
 extend_schema_view(
-    get=extend_schema(summary='Listar API Keys', responses=ApiKeySerializer(many=True)),
+    get=extend_schema(
+        summary='Listar API Keys',
+        parameters=[OpenApiParameter('revocadas', str, enum=['0', '1'],
+                                     description='1: solo revocadas; 0: solo activas.')],
+        responses=ApiKeySerializer(many=True),
+    ),
     post=extend_schema(summary='Crear API Key', request=ApiKeySerializer,
                        responses={201: _ApiKeyCreada}),
 )(ApiKeyListCreateView)
@@ -71,9 +79,36 @@ extend_schema_view(delete=extend_schema(
     responses={204: OpenApiResponse(description='Revocada')},
 ))(ApiKeyRevokeView)
 
+extend_schema_view(delete=extend_schema(
+    summary='Eliminar API Key revocada', request=None,
+    responses={204: OpenApiResponse(description='Eliminada'), 409: _ErrorConflicto},
+))(ApiKeyEliminarView)
+
 extend_schema_view(get=extend_schema(
-    summary='Últimos eventos recibidos', responses=WebhookEventListSerializer(many=True),
+    summary='Eventos recibidos (50 por página, del más reciente al más antiguo)',
+    parameters=[
+        OpenApiParameter('estado', str, enum=['RECIBIDO', 'PROCESADO', 'IGNORADO', 'ERROR']),
+        OpenApiParameter('tipo', str),
+        OpenApiParameter('proveedor', str),
+        OpenApiParameter('event_id', str),
+        OpenApiParameter('antes', int, description='Cursor: devuelve los eventos con id menor que este.'),
+    ],
+    responses=WebhookEventListSerializer(many=True),
 ))(WebhookEventListView)
+
+extend_schema_view(get=extend_schema(
+    summary='Detalle de evento (con payload y API key)', responses=WebhookEventDetalleSerializer,
+))(WebhookEventDetailView)
+
+_EventoReencolado = inline_serializer('EventoReencolado', {
+    'id': serializers.IntegerField(),
+    'estado': serializers.CharField(),
+})
+
+extend_schema_view(post=extend_schema(
+    summary='Reprocesar evento en error o pendiente', request=None,
+    responses={202: _EventoReencolado, 409: _ErrorConflicto},
+))(WebhookEventReprocesarView)
 
 
 # --- Webhooks salientes (destinos y entregas) ---
@@ -83,7 +118,6 @@ _DestinoConSecreto = inline_serializer('WebhookDestinoConSecreto', {
     'secreto': serializers.CharField(help_text='Solo se muestra en esta respuesta.'),
 })
 _ErrorDetalle = inline_serializer('ErrorDetalle', {'detail': serializers.CharField()})
-_ErrorConflicto = inline_serializer('ErrorConflicto', {'error': serializers.CharField()})
 
 extend_schema_view(
     get=extend_schema(summary='Listar destinos de webhooks salientes',

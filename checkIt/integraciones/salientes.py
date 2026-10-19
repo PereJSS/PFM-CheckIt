@@ -24,7 +24,7 @@ from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util import parse_url
 
-from .models import EntregaWebhook, WebhookDestino
+from .models import EVENTO_PDF_LISTO, EntregaWebhook, WebhookDestino
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ TIMEOUT_LECTURA = config('WEBHOOK_SALIENTE_TIMEOUT', default=5, cast=float)
 MAX_REINTENTOS = config('WEBHOOK_SALIENTE_MAX_REINTENTOS', default=5, cast=int)
 BACKOFF_BASE = config('WEBHOOK_SALIENTE_BACKOFF_BASE', default=30, cast=int)
 MAX_DESTINOS = config('WEBHOOK_SALIENTE_MAX_DESTINOS', default=10, cast=int)
+# Días que se conservan las entregas cerradas antes de la purga periódica
+RETENCION_DIAS = config('WEBHOOK_ENTREGAS_RETENCION_DIAS', default=90, cast=int)
 # Solo para desarrollo: permite http y destinos locales/privados
 PERMITIR_LOCAL = config('WEBHOOK_SALIENTE_PERMITIR_LOCAL', default=False, cast=bool)
 
@@ -206,8 +208,13 @@ def construir_payload(tipo, inspeccion, event_id):
         'estado': inspeccion.estado,
         'pdf_estado': inspeccion.pdf_estado,
     }
-    # TODO(pdf.listo): añadir 'pdf_url' cuando exista un endpoint de descarga
-    # firmado y con caducidad; claim-report exige JWT y el PMS no lo tiene.
+    if tipo == EVENTO_PDF_LISTO:
+        from inspecciones.pdf_publico import caducidad, url_pdf_firmada
+
+        # Enlace firmado y con caducidad: el PMS no tiene JWT para claim-report.
+        # Un reintento manual pasado ese plazo entrega un enlace ya caducado.
+        datos['pdf_url'] = url_pdf_firmada(inspeccion.pk)
+        datos['pdf_url_caduca'] = (timezone.now() + caducidad()).isoformat()
     return {
         'event_id': str(event_id),
         'tipo': tipo,
@@ -389,4 +396,19 @@ def reencolar_atascadas(limite=100):
     return reencoladas
 
 
-# TODO: purga periódica de entregas antiguas (p. ej. ENTREGADA con más de 90 días).
+def purgar_entregas_antiguas(dias=RETENCION_DIAS, lote=500):
+    """
+    Borra por lotes las entregas cerradas (ENTREGADA/FALLIDA) creadas hace más de
+    `dias`. Las PENDIENTE nunca se tocan. Devuelve cuántas se borraron.
+    """
+    corte = timezone.now() - timedelta(days=dias)
+    cerradas = EntregaWebhook.objects.filter(
+        estado__in=[EntregaWebhook.Estado.ENTREGADA, EntregaWebhook.Estado.FALLIDA], creada__lt=corte,
+    )
+    borradas = 0
+    while True:
+        # Por lotes de ids: un DELETE masivo bloquearía la tabla mucho rato
+        ids = list(cerradas.order_by('pk').values_list('pk', flat=True)[:lote])
+        if not ids:
+            return borradas
+        borradas += EntregaWebhook.objects.filter(pk__in=ids).delete()[0]

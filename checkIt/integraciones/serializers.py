@@ -18,6 +18,19 @@ class WebhookEventListSerializer(serializers.ModelSerializer):
         fields = ('id', 'proveedor', 'event_id', 'tipo', 'estado', 'error', 'inspeccion', 'recibido', 'procesado')
 
 
+class WebhookEventDetalleSerializer(WebhookEventListSerializer):
+    api_key = serializers.SerializerMethodField()
+
+    class Meta(WebhookEventListSerializer.Meta):
+        fields = WebhookEventListSerializer.Meta.fields + ('payload', 'api_key')
+
+    def get_api_key(self, evento) -> dict | None:
+        # Null si la clave se eliminó después de recibir el evento
+        if evento.api_key is None:
+            return None
+        return {'id': evento.api_key.pk, 'nombre': evento.api_key.nombre, 'prefijo': evento.api_key.prefijo}
+
+
 class PmsWebhookSerializer(serializers.Serializer):
     """
     Formato genérico de evento PMS:

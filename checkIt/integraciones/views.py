@@ -19,6 +19,7 @@ from .serializers import (
     EntregaWebhookSerializer,
     PmsWebhookSerializer,
     WebhookDestinoSerializer,
+    WebhookEventDetalleSerializer,
     WebhookEventListSerializer,
 )
 from .services import marcar_error, procesar_evento, reabrir_para_reproceso
@@ -90,9 +91,16 @@ class PmsWebhookView(APIView):
 class ApiKeyListCreateView(APIView):
     """Gestión de API Keys del admin autenticado (JWT)."""
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def get(self, request):
         claves = ApiKey.objects.filter(owner=request.user).order_by('-creada')
+        revocadas = request.query_params.get('revocadas')
+        if revocadas:
+            if revocadas not in ('0', '1'):
+                return Response({"revocadas": "Debe ser 0 o 1."}, status=status.HTTP_400_BAD_REQUEST)
+            claves = claves.filter(revocada=revocadas == '1')
         return Response(ApiKeySerializer(claves, many=True).data)
 
     def post(self, request):
@@ -105,6 +113,8 @@ class ApiKeyListCreateView(APIView):
 
 class ApiKeyRevokeView(APIView):
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def delete(self, request, pk):
         # 404 (no 403) si la clave es de otro tenant, para no permitir enumeración
@@ -114,13 +124,86 @@ class ApiKeyRevokeView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class WebhookEventListView(APIView):
-    """Últimos eventos recibidos, para que el admin depure su integración."""
+class ApiKeyEliminarView(APIView):
+    """Borra una clave ya revocada. Sus eventos se conservan (api_key queda a null)."""
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
+
+    def delete(self, request, pk):
+        api_key = get_object_or_404(ApiKey, pk=pk, owner=request.user)
+        # Paso explícito en dos tiempos: una clave en uso nunca se borra por error
+        if not api_key.revocada:
+            return Response(
+                {"error": "Revoca la API key antes de eliminarla."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        api_key.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+EVENTOS_POR_PAGINA = 50
+
+
+class WebhookEventListView(APIView):
+    """
+    Eventos recibidos, del más reciente al más antiguo, para que el admin depure
+    su integración. Filtros: ?estado=, ?tipo=, ?proveedor=, ?event_id=.
+    Paginación por cursor: ?antes=<id> devuelve los 50 anteriores a ese id.
+    """
+    permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def get(self, request):
-        eventos = WebhookEvent.objects.filter(owner=request.user).order_by('-recibido')[:50]
+        eventos = WebhookEvent.objects.filter(owner=request.user)
+        params = request.query_params
+        estado = params.get('estado')
+        if estado:
+            if estado not in WebhookEvent.Estado.values:
+                return Response({"estado": "Estado no válido."}, status=status.HTTP_400_BAD_REQUEST)
+            eventos = eventos.filter(estado=estado)
+        for campo in ('tipo', 'proveedor', 'event_id'):
+            if params.get(campo):
+                eventos = eventos.filter(**{campo: params[campo]})
+        antes = params.get('antes')
+        if antes:
+            if not antes.isdigit():
+                return Response({"antes": "Debe ser un id numérico."}, status=status.HTTP_400_BAD_REQUEST)
+            eventos = eventos.filter(pk__lt=int(antes))
+        # Orden por id (no por fecha): el cursor ?antes= necesita un orden estricto
+        eventos = eventos.order_by('-id')[:EVENTOS_POR_PAGINA]
         return Response(WebhookEventListSerializer(eventos, many=True).data)
+
+
+class WebhookEventDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
+
+    def get(self, request, pk):
+        evento = get_object_or_404(WebhookEvent.objects.select_related('api_key'), pk=pk, owner=request.user)
+        return Response(WebhookEventDetalleSerializer(evento).data)
+
+
+class WebhookEventReprocesarView(APIView):
+    """
+    Reencola un evento en ERROR (p. ej. tras enlazar el external_id que faltaba) o
+    uno que sigue en RECIBIDO. Equivale a que el PMS lo reenvíe.
+    """
+    permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
+
+    def post(self, request, pk):
+        evento = get_object_or_404(WebhookEvent, pk=pk, owner=request.user)
+        if not reabrir_para_reproceso(evento):
+            return Response(
+                {"error": "Solo se pueden reprocesar eventos en error o pendientes."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        transaction.on_commit(lambda: _encolar(evento))
+        return Response({"id": evento.pk, "estado": evento.estado}, status=status.HTTP_202_ACCEPTED)
 
 
 def _limite_destinos_superado(owner, excluir_pk=None):
@@ -140,6 +223,8 @@ def _respuesta_limite_destinos():
 class WebhookDestinoListCreateView(APIView):
     """Destinos de webhooks salientes (CheckIt -> PMS) del admin autenticado."""
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def get(self, request):
         destinos = WebhookDestino.objects.filter(owner=request.user).order_by('-creado')
@@ -160,6 +245,8 @@ class WebhookDestinoListCreateView(APIView):
 
 class WebhookDestinoDetailView(APIView):
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def _destino(self, request, pk):
         # 404 (no 403) si es de otro tenant, para no permitir enumeración
@@ -188,6 +275,8 @@ class WebhookDestinoDetailView(APIView):
 
 class WebhookDestinoRotarSecretoView(APIView):
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def post(self, request, pk):
         destino = get_object_or_404(WebhookDestino, pk=pk, owner=request.user)
@@ -199,6 +288,8 @@ class WebhookDestinoRotarSecretoView(APIView):
 class EntregaWebhookListView(APIView):
     """Últimas entregas salientes, filtrables por ?destino= y ?estado=."""
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def get(self, request):
         entregas = EntregaWebhook.objects.filter(destino__owner=request.user).select_related('destino')
@@ -222,6 +313,8 @@ class EntregaWebhookReintentarView(APIView):
     los últimos 10 min, p. ej. porque el broker estaba caído al emitirla).
     """
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'integraciones'
 
     def post(self, request, pk):
         entrega = get_object_or_404(EntregaWebhook, pk=pk, destino__owner=request.user)
