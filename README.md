@@ -171,6 +171,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `ALLOWED_HOSTS`       | No          | Hosts permitidos                                     |
 | `REDIS_URL`           | En producción | URL de Redis: broker de Celery y, si está definida, caché compartida (throttling y lock del re-sellado TSA) |
 | `WEBHOOK_THROTTLE_RATE` | No        | Límite del endpoint de webhooks (por defecto `120/min`) |
+| `INTEGRACIONES_THROTTLE_RATE` | No  | Límite de las vistas de gestión del panel de Integraciones (API keys, eventos, destinos, entregas) por usuario (por defecto `120/min`) |
 | `AUDIT_THROTTLE_RATE` | No          | Límite de la auditoría pública por IP (por defecto `30/min`) |
 | `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
 | `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
@@ -181,7 +182,10 @@ El proyecto usa python-decouple. Variables disponibles:
 | `WEBHOOK_SALIENTE_MAX_REINTENTOS` | No | Reintentos ante 5xx o error de red (por defecto `5`) |
 | `WEBHOOK_SALIENTE_BACKOFF_BASE` | No | Base del backoff exponencial en segundos: `base·2^n` (por defecto `30`) |
 | `WEBHOOK_SALIENTE_MAX_DESTINOS` | No | Máximo de destinos activos por administrador (por defecto `10`) |
-| `WEBHOOK_SALIENTE_PERMITIR_LOCAL` | No | **Solo desarrollo.** Permite `http` y destinos locales o privados, desactivando la protección SSRF (por defecto `False`) |
+| `WEBHOOK_SALIENTE_PERMITIR_LOCAL` | No | **Solo desarrollo.** Permite `http` y destinos locales o privados, desactivando la protección SSRF (por defecto `False`). Con `DEBUG=False` el arranque avisa (`integraciones.W001`) |
+| `WEBHOOK_ENTREGAS_RETENCION_DIAS` | No | Días que se conservan las entregas cerradas (entregadas o fallidas) antes de la purga diaria vía Celery beat (por defecto `90`) |
+| `BACKEND_PUBLIC_URL` | No | URL pública del backend, base de los enlaces absolutos de los webhooks como `pdf_url` (por defecto `https://pfm-checkit.onrender.com`) |
+| `PDF_URL_CADUCIDAD_HORAS` | No | Validez en horas del enlace firmado de descarga del PDF que lleva el webhook `pdf.listo` (por defecto `72`) |
 | `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
 | `TSA_RESELLO_BATCH_SIZE` | No        | Máximo de evidencias sin sello que reintenta cada ejecución de la tarea periódica (por defecto `20`) |
