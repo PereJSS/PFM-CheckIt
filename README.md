@@ -192,8 +192,17 @@ El proyecto usa python-decouple. Variables disponibles:
 | `AWS_S3_ENDPOINT_URL` | Con R2 | Endpoint S3 de la cuenta: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (sin el nombre del bucket). Vacío en AWS S3 |
 | `AWS_S3_REGION_NAME` | No | Región del bucket (por defecto `auto`, la que usa R2) |
 | `AWS_QUERYSTRING_EXPIRE` | No | Segundos de validez de las URL firmadas de las fotos (por defecto `3600`). El bucket es privado: nunca se sirve una foto sin firma |
-| `TSA_URL`             | No          | Servidor de sellado RFC 3161 (por defecto FreeTSA)   |
+| `TSA_URL`             | No          | Servidor de sellado RFC 3161 de cada foto (por defecto FreeTSA)   |
 | `TSA_TIMEOUT`         | No          | Timeout en segundos del sellado TSA, aplicado a la conexión y a cada lectura (por defecto `3`; valores no válidos o ≤ 0 vuelven a `3`). Si se supera, la evidencia se guarda sin sello |
+| `TSA_USUARIO` / `TSA_PASSWORD` | No | Basic auth de la TSA, si la exige |
+| `TSA_CERT_CLIENTE` / `TSA_CLAVE_CLIENTE` | No | Rutas del certificado y la clave de cliente para mTLS (o un único PEM con los dos en `TSA_CERT_CLIENTE`) |
+| `TSA_CERT` | Recomendada | Ruta del certificado de la TSA (PEM o DER). Los tokens se verifican contra él (firma, EKU timeStamping y validez en la hora del sello); sin él solo se comprueba su integridad con el certificado que trae el propio token, y el sello nunca cuenta como verificado ni cualificado. Una `TSA_URL` en `http` solo se admite con este certificado fijado |
+| `TSA_POLITICA` | No | OID de política de sellado, si la TSA lo pide |
+| `TSA_CUALIFICADA` | No | `True` solo si la TSA es un prestador cualificado eIDAS; se refleja en el PDF (por defecto `False`) |
+| `TSA_MANIFIESTO_URL` | No | TSA (idealmente cualificada) para la raíz Merkle de cada inspección y para el sello de la firma del PDF. Vacía: se usa la TSA de las fotos con toda su configuración |
+| `TSA_MANIFIESTO_TIMEOUT`, `_USUARIO`, `_PASSWORD`, `_CERT_CLIENTE`, `_CLAVE_CLIENTE`, `_CERT`, `_POLITICA`, `_CUALIFICADA` | No | Igual que las `TSA_*` anteriores, para esa TSA (timeout por defecto `10`) |
+| `PDF_SIGNING_PKCS12_PATH` / `PDF_SIGNING_PKCS12_PASSWORD` | No | Sello de empresa en PKCS#12 (`.p12`/`.pfx`). Si se define, sustituye a `PDF_SIGNING_KEY_PATH` + `PDF_SIGNING_CERT_PATH` |
+| `PDF_FIRMA_SELLO_TIEMPO` | No | Añade a la firma del PDF un sello de la TSA del manifiesto (PAdES-B-T; por defecto `true`). Si la TSA no responde, se firma sin sello y se avisa en el log |
 | `TSA_RESELLO_BATCH_SIZE` | No        | Máximo de evidencias sin sello que reintenta cada ejecución de la tarea periódica (por defecto `20`) |
 | `TSA_RESELLO_MAX_FALLOS` | No        | Fallos consecutivos tras los que se corta el lote (por defecto `3`) |
 | `TSA_RESELLO_PAUSA_SEG` | No        | Pausa en segundos entre peticiones a la TSA durante el re-sellado (por defecto `1`) |
@@ -411,9 +420,15 @@ cd checkIt
 celery -A core worker --loglevel=info
 ```
 
+### Manifiesto Merkle por inspección
+
+Al pasar una inspección a `COMPLETADA` se congela su manifiesto: los hashes SHA-256 de sus evidencias ordenados por id y la raíz de su árbol Merkle (RFC 6962: prefijo `0x00` en hojas y `0x01` en nodos). Solo se sella la raíz, con la TSA de `TSA_MANIFIESTO_*`: un sello por inspección en vez de uno por foto. El manifiesto y su token se guardan en la inspección y el PDF muestra la raíz, la hora certificada y si el sello es cualificado. El congelado ocurre en la misma transacción que el cambio de estado y bloquea la fila de la inspección, así que una subida simultánea o entra en el manifiesto o recibe `409`: una inspección completada no admite evidencias nuevas. Si un administrador la reabre, el manifiesto sellado se archiva en `manifiestos_anteriores` y el siguiente completado congela y sella uno nuevo. Cada foto se puede probar después con su ruta de inclusión (`inspecciones/services/merkle.py`).
+
+Cada token TSA, de foto o de manifiesto, se verifica antes de guardarlo: nonce, hash sellado y firma (contra `TSA_CERT` / `TSA_MANIFIESTO_CERT` si están definidos).
+
 ### Re-sellado TSA periódico (Celery beat)
 
-Si FreeTSA falla o supera el timeout, la evidencia se guarda sin sello (modo degradado). La tarea `inspecciones.tasks.resellar_evidencias_pendientes` se ejecuta cada 10 minutos (`CELERY_BEAT_SCHEDULE`) y reintenta el sellado de las evidencias con hash y sin `tsa_token`, en lotes de `TSA_RESELLO_BATCH_SIZE`, con pausa entre peticiones y corte tras varios fallos consecutivos (para no martillear a FreeTSA si está caído). Un fallo individual se registra en el log y no interrumpe el lote. Un lock en caché evita ejecuciones solapadas. Requiere un planificador beat; la opción recomendada es embeberlo en el worker existente (una sola instancia):
+Si FreeTSA falla o supera el timeout, la evidencia se guarda sin sello (modo degradado). La tarea `inspecciones.tasks.resellar_evidencias_pendientes` se ejecuta cada 10 minutos (`CELERY_BEAT_SCHEDULE`) y reintenta el sellado de las evidencias con hash y sin `tsa_token`, y después el de los manifiestos de inspecciones completadas que siguen sin sello, en lotes de `TSA_RESELLO_BATCH_SIZE`, con pausa entre peticiones y corte tras varios fallos consecutivos (para no martillear a FreeTSA si está caído). Un fallo individual se registra en el log y no interrumpe el lote. Un lock en caché evita ejecuciones solapadas. Requiere un planificador beat; la opción recomendada es embeberlo en el worker existente (una sola instancia):
 
 ```bash
 celery -A core worker -B --loglevel=info

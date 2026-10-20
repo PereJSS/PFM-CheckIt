@@ -1,6 +1,7 @@
 import io
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 
 from django.utils.timezone import localtime, now as tz_now
 from reportlab.lib import colors
@@ -238,6 +239,46 @@ def generate_claim_pdf(inspection) -> bytes:
     return buffer.getvalue()
 
 
+def _host(url):
+    return urlparse(url).hostname or url or '—'
+
+
+def _seccion_manifiesto(inspeccion, s):
+    """Raíz Merkle de la inspección y su sello de tiempo, o el motivo por el que falta."""
+    flowables = [Paragraph('Manifiesto Merkle de la Inspección (RFC 6962)', s['h2'])]
+    if not inspeccion.manifiesto_raiz:
+        flowables.append(Paragraph(
+            'Manifiesto pendiente: se genera y se sella al completar la inspección.', s['value'],
+        ))
+        return flowables
+
+    num_hojas = len((inspeccion.manifiesto or {}).get('hojas', []))
+    if inspeccion.manifiesto_tsa_token:
+        ts = inspeccion.manifiesto_tsa_timestamp
+        ts_str = ts.strftime('%d/%m/%Y %H:%M:%S UTC') if ts else '—'
+        tipo = ('Sello de tiempo cualificado (eIDAS)' if inspeccion.manifiesto_tsa_cualificada
+                else 'Sello de tiempo no cualificado')
+        sello = f'{tipo} · {ts_str} · {_host(inspeccion.manifiesto_tsa_url)}'
+        if not inspeccion.manifiesto_tsa_verificado:
+            sello += ' · emisor no verificado contra un certificado de TSA de confianza'
+    else:
+        sello = 'Sello pendiente: la TSA no respondió; se reintenta automáticamente.'
+    filas = [
+        ['Evidencias incluidas', str(num_hojas)],
+        ['Raíz SHA-256', Paragraph(inspeccion.manifiesto_raiz, s['small'])],
+        ['Sello RFC 3161', Paragraph(sello, s['small'])],
+    ]
+    flowables.append(_kv_table(filas, col_widths=[4.5 * cm, PAGE_W - 2 * MARGIN - 4.5 * cm]))
+    flowables.append(Spacer(1, 0.2 * cm))
+    flowables.append(Paragraph(
+        'La raíz resume los hashes de todas las evidencias en el orden en que se registraron: '
+        'cambiar, añadir o quitar una foto cambia la raíz. Cada foto se puede comprobar por '
+        'separado con su prueba de inclusión.',
+        s['small'],
+    ))
+    return flowables
+
+
 def generar_informe_base(inspeccion, output_path=None):
     """Genera el PDF base de la reclamación usando los campos reales del modelo."""
     if output_path is None:
@@ -341,14 +382,24 @@ def generar_informe_base(inspeccion, output_path=None):
 
     story.append(Spacer(1, 0.3 * cm))
 
+    # ── Manifiesto Merkle de la inspección ───────────────────────────────────
+    story.extend(_seccion_manifiesto(inspeccion, s))
+
     # ── Firma Digital X.509 ──────────────────────────────────────────────────
-    story.append(Paragraph('Firma Digital X.509 / PKCS#7', s['h2']))
-    cert_path = os.getenv('PDF_SIGNING_CERT_PATH', 'certs/signing.crt')
+    from . import pdf_signer, tsa
+
+    story.append(Paragraph('Firma Digital X.509 (PAdES)', s['h2']))
+    cert_path = os.getenv('PDF_SIGNING_PKCS12_PATH') or os.getenv('PDF_SIGNING_CERT_PATH', 'certs/signing.crt')
+    if pdf_signer.sello_tiempo_activo():
+        sello_firma = f"Solicitado a {_host(tsa.configuracion(tsa.PERFIL_MANIFIESTO)['url'])} (PAdES-B-T)"
+    else:
+        sello_firma = 'No (PAdES-B-B)'
     firma_rows = [
-        ['Tipo de firma', 'X.509 / PKCS#7 (PDF con escritura incremental)'],
+        ['Tipo de firma', 'PAdES / CMS (PDF con escritura incremental)'],
         ['Algoritmo', 'RSA + SHA-256'],
         ['Campo de firma', 'Firma_Pericial_CheckIt'],
         ['Certificado', os.path.basename(cert_path)],
+        ['Sello de tiempo', sello_firma],
         ['Fecha de emisión', localtime(tz_now()).strftime('%d/%m/%Y %H:%M:%S')],
     ]
     story.append(_kv_table(firma_rows, col_widths=[4.5 * cm, PAGE_W - 2 * MARGIN - 4.5 * cm]))
@@ -356,7 +407,8 @@ def generar_informe_base(inspeccion, output_path=None):
     story.append(Paragraph(
         'La firma digital X.509 integrada en este PDF garantiza su inmutabilidad legal desde el momento '
         'de la firma. Para verificarla, ábralo con Adobe Acrobat Reader o cualquier validador PDF '
-        'compatible con firmas PKCS#7.',
+        'compatible con firmas PAdES; el panel de firmas indica si lleva sello de tiempo (si la TSA '
+        'no respondió al firmar, la firma se emite sin él).',
         s['small'],
     ))
 
