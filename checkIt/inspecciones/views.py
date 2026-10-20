@@ -1,3 +1,4 @@
+import re
 
 from rest_framework import viewsets
 from rest_framework import status
@@ -18,6 +19,7 @@ from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
 from .models import Evidencia
 from django.http import HttpResponse
+from django.db import transaction
 from django.db.models import QuerySet
 from typing import cast
 from users.permissions import es_admin
@@ -36,6 +38,8 @@ AUDIT_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 dias
 
 
 _is_admin_user = es_admin
+
+_HASH_SHA256 = re.compile(r'^[0-9a-f]{64}$')
 
 
 def _is_operario_user(usuario):
@@ -271,6 +275,13 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # El manifiesto Merkle se congela al completar: no se admiten evidencias nuevas
+        if inspeccion.estado == Inspeccion.Estado.COMPLETADA:
+            return Response(
+                {"error": "La inspección ya está completada; no admite más evidencias."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         foto = request.FILES.get('foto')
         file_error = _validate_evidence_file(foto)
         if file_error:
@@ -279,17 +290,32 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        hash_sha256 = request.data.get('hash_sha256') or None
+        hash_sha256 = (request.data.get('hash_sha256') or '').strip().lower() or None
+        if hash_sha256 and not _HASH_SHA256.match(hash_sha256):
+            return Response(
+                {"error": "hash_sha256 debe ser un SHA-256 en hexadecimal (64 caracteres)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # La TSA se consulta antes del bloqueo para no retener la fila durante la llamada de red
         tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
 
-        evidencia = Evidencia.objects.create(
-            inspeccion=inspeccion,
-            foto=foto,
-            descripcion=request.data.get('descripcion') or '',
-            hash_sha256=hash_sha256,
-            tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
-            tsa_token=tsa_data.get('token') if tsa_data else None,
-        )
+        with transaction.atomic():
+            # Mismo bloqueo que congelar_manifiesto: o la evidencia entra antes del
+            # congelado y queda en el manifiesto, o ve la inspección completada
+            estado = Inspeccion.objects.select_for_update().values_list('estado', flat=True).get(pk=inspeccion.pk)
+            if estado == Inspeccion.Estado.COMPLETADA:
+                return Response(
+                    {"error": "La inspección ya está completada; no admite más evidencias."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            evidencia = Evidencia.objects.create(
+                inspeccion=inspeccion,
+                foto=foto,
+                descripcion=request.data.get('descripcion') or '',
+                hash_sha256=hash_sha256,
+                tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
+                tsa_token=tsa_data.get('token') if tsa_data else None,
+            )
 
         return Response(
             {

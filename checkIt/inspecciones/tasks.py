@@ -14,12 +14,19 @@ def generar_pdf_async(self, inspeccion_id):
     from .models import Inspeccion
     from .services import pdf_signer
     from .services.almacen import guardar_pdf
+    from .services.manifiesto import sellar_manifiesto
     from .services.pdf_generator import generar_informe_base
 
     inspeccion = Inspeccion.objects.get(pk=inspeccion_id)
     try:
         inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
         inspeccion.save(update_fields=['pdf_estado'])
+
+        # Si el manifiesto aún no tiene sello, se intenta antes para que el PDF lo recoja.
+        # Se recarga siempre: aunque la TSA falle, la raíz puede haberse congelado
+        if not inspeccion.manifiesto_tsa_token:
+            sellar_manifiesto(inspeccion.pk)
+            inspeccion.refresh_from_db()
 
         # Los ficheros locales son intermedios (se borran al salir): el PDF válido vive en el storage
         with tempfile.TemporaryDirectory(prefix='checkit-pdf-') as directorio:
@@ -37,6 +44,13 @@ def generar_pdf_async(self, inspeccion_id):
         raise self.retry(exc=exc)
 
 
+@shared_task(time_limit=60, soft_time_limit=50, ignore_result=True)
+def sellar_manifiesto_async(inspeccion_id):
+    """Congela y sella el manifiesto Merkle al completar la inspección; si la TSA falla, lo reintenta el re-sellado periódico."""
+    from .services.manifiesto import sellar_manifiesto
+    return sellar_manifiesto(inspeccion_id)
+
+
 RESELLO_LOCK_KEY = 'tsa:resello:lock'
 RESELLO_LOCK_TIMEOUT = 300  # igual que time_limit: si el worker muere, el lock caduca
 
@@ -51,7 +65,8 @@ def _setting_num(nombre, defecto, tipo=int, minimo=0):
 
 @shared_task(time_limit=300, soft_time_limit=270)
 def resellar_evidencias_pendientes():
-    """Reintenta el sellado TSA de evidencias guardadas en modo degradado (sin tsa_token)."""
+    """Reintenta el sellado TSA de evidencias guardadas en modo degradado (sin tsa_token)
+    y de los manifiestos de inspecciones completadas que siguen sin sello."""
     from celery.exceptions import SoftTimeLimitExceeded
     from django.core.cache import cache
     from django.db.models import F
@@ -75,6 +90,7 @@ def resellar_evidencias_pendientes():
             .order_by(F('tsa_ultimo_intento').asc(nulls_first=True), 'pk')[:lote]
         )
         procesadas = selladas = fallos_seguidos = 0
+        sin_tiempo = False
         for n, evidencia in enumerate(pendientes):
             if n and pausa:
                 time.sleep(pausa)
@@ -84,6 +100,7 @@ def resellar_evidencias_pendientes():
                 tsa_data = solicitar_sello_tiempo(evidencia.hash_sha256)
             except SoftTimeLimitExceeded:
                 logger.warning('Re-sellado TSA interrumpido por límite de tiempo')
+                sin_tiempo = True
                 break
             except Exception:
                 logger.warning('Fallo re-sellando evidencia %s', evidencia.pk, exc_info=True)
@@ -112,6 +129,45 @@ def resellar_evidencias_pendientes():
             logger.warning('Re-sellado TSA: 0/%s evidencias selladas', procesadas)
         else:
             logger.info('Re-sellado TSA: %s/%s evidencias selladas', selladas, procesadas)
-        return {'procesadas': procesadas, 'selladas': selladas}
+        # Los manifiestos usan su propia TSA: los fallos de evidencias no los bloquean
+        manifiestos = 0 if sin_tiempo else _resellar_manifiestos(lote, max_fallos, pausa)
+        return {'procesadas': procesadas, 'selladas': selladas, 'manifiestos_sellados': manifiestos}
     finally:
         cache.delete(RESELLO_LOCK_KEY)
+
+
+def _resellar_manifiestos(lote, max_fallos, pausa):
+    """Sella manifiestos pendientes de inspecciones completadas. Devuelve cuántos quedan sellados."""
+    from celery.exceptions import SoftTimeLimitExceeded
+    from django.db.models import F
+    from .models import Inspeccion
+    from .services.manifiesto import sellar_manifiesto
+
+    pendientes = list(
+        Inspeccion.objects.filter(estado=Inspeccion.Estado.COMPLETADA, manifiesto_tsa_token__isnull=True)
+        .order_by(F('manifiesto_tsa_ultimo_intento').asc(nulls_first=True), 'pk')
+        .values_list('pk', flat=True)[:lote]
+    )
+    sellados = fallos_seguidos = 0
+    for n, inspeccion_id in enumerate(pendientes):
+        if n and pausa:
+            time.sleep(pausa)
+        try:
+            ok = sellar_manifiesto(inspeccion_id)
+        except SoftTimeLimitExceeded:
+            logger.warning('Re-sellado de manifiestos interrumpido por límite de tiempo')
+            break
+        except Exception:
+            logger.warning('Fallo sellando el manifiesto de la inspección %s', inspeccion_id, exc_info=True)
+            ok = False
+        if not ok:
+            fallos_seguidos += 1
+            if fallos_seguidos >= max_fallos:
+                logger.warning('Re-sellado de manifiestos cortado tras %s fallos consecutivos', fallos_seguidos)
+                break
+            continue
+        fallos_seguidos = 0
+        sellados += 1
+    if pendientes:
+        logger.info('Re-sellado TSA: %s/%s manifiestos sellados', sellados, len(pendientes))
+    return sellados

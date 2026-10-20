@@ -615,7 +615,7 @@ class ResellarEvidenciasPendientesTest(TestCase):
         self.assertIsNone(e2.tsa_token)
         self.assertEqual(bytes(e3.tsa_token), b'ok')
         self.assertEqual(mock_tsa.call_count, 3)
-        self.assertEqual(resultado, {'procesadas': 3, 'selladas': 1})
+        self.assertEqual(resultado, {'procesadas': 3, 'selladas': 1, 'manifiestos_sellados': 0})
 
     @patch('inspecciones.tasks.solicitar_sello_tiempo')
     def test_respeta_tamano_de_lote(self, mock_tsa):

@@ -26,6 +26,27 @@ class Inspeccion(models.Model):
     pdf_estado = models.CharField(max_length=10, choices=PdfEstado.choices, default=PdfEstado.PENDIENTE)
     pdf_ruta = models.CharField(max_length=500, blank=True, null=True)
 
+    # Manifiesto Merkle: se congela al completar la inspección y se sella solo su raíz
+    manifiesto = models.JSONField(blank=True, null=True, editable=False)
+    manifiesto_raiz = models.CharField(max_length=64, blank=True, null=True, editable=False, verbose_name="Raíz Merkle")
+    manifiesto_tsa_token = models.BinaryField(blank=True, null=True, editable=False, verbose_name="Token TSA del manifiesto")
+    manifiesto_tsa_timestamp = models.DateTimeField(blank=True, null=True, editable=False)
+    manifiesto_tsa_url = models.CharField(max_length=500, blank=True, default='', editable=False)
+    manifiesto_tsa_cualificada = models.BooleanField(default=False, editable=False)
+    manifiesto_tsa_verificado = models.BooleanField(default=False, editable=False)
+    manifiesto_tsa_ultimo_intento = models.DateTimeField(blank=True, null=True, editable=False)
+    # Manifiestos sellados de completados anteriores (si se reabrió la inspección): tienen valor probatorio
+    manifiestos_anteriores = models.JSONField(default=list, blank=True, editable=False)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=['manifiesto_tsa_ultimo_intento', 'id'],
+                name='inspeccion_manif_pend_idx',
+                condition=models.Q(estado='COMPLETADA', manifiesto_tsa_token__isnull=True),
+            ),
+        ]
+
     def __str__(self) -> str:
         return f"Inspección {self.pk} - {self.propiedad.nombre} asignada a {self.operario.username if self.operario else 'Sin operario'} - Estado: {self.estado_display()}"
 

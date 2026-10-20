@@ -15,7 +15,8 @@ class InspeccionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Inspeccion
-        fields = '__all__'
+        # El manifiesto completo y los tokens van en el PDF y en el paquete probatorio, no en cada listado
+        exclude = ('manifiesto', 'manifiesto_tsa_token', 'manifiesto_tsa_ultimo_intento', 'manifiestos_anteriores')
 
     def get_operario_nombre(self, obj):
         if obj.operario:

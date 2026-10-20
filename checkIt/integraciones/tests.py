@@ -746,7 +746,8 @@ class SenalesSalientesTest(BaseSalientesTest):
         with self.captureOnCommitCallbacks(execute=False) as callbacks:
             self.inspeccion.save()
         mock_encolar.assert_not_called()
-        self.assertEqual(len(callbacks), 1)
+        # El webhook y el sellado del manifiesto Merkle (inspecciones.signals)
+        self.assertEqual(len(callbacks), 2)
 
     def test_solo_dispara_en_la_transicion(self, mock_encolar):
         self._completar()
