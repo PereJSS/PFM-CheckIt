@@ -6,4 +6,4 @@ class InspeccionesConfig(AppConfig):
     name = 'inspecciones'
 
     def ready(self):
-        from . import signals  # noqa: F401
+        from . import checks, signals  # noqa: F401  (system checks y ciclo de vida del manifiesto)

@@ -780,3 +780,28 @@ class ManifiestoCicloDeVidaTest(_ConInspeccion, APITestCase):
                       side_effect=lambda entrada, salida: os.replace(entrada, salida)):
             generar_pdf_async(self.inspeccion.pk)
         self.assertEqual(raices, [merkle.raiz([bytes.fromhex(HASH_A)]).hex()])
+
+
+class ClaveFirmaCheckTest(TestCase):
+    def _avisos(self):
+        from .checks import check_clave_firma_por_defecto
+        return [a.id for a in check_clave_firma_por_defecto(None)]
+
+    @override_settings(DEBUG=False)
+    def test_avisa_con_la_clave_por_defecto_en_produccion(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('PDF_SIGNING_PKCS12_PATH', None)
+            os.environ.pop('PDF_SIGNING_KEY_PATH', None)
+            self.assertEqual(self._avisos(), ['inspecciones.W001'])
+
+    @override_settings(DEBUG=False)
+    def test_sin_aviso_con_pkcs12_o_clave_propia(self):
+        with patch.dict(os.environ, {'PDF_SIGNING_PKCS12_PATH': '/etc/secrets/sello.p12'}):
+            self.assertEqual(self._avisos(), [])
+        with patch.dict(os.environ, {'PDF_SIGNING_KEY_PATH': '/etc/secrets/firma.key'}):
+            os.environ.pop('PDF_SIGNING_PKCS12_PATH', None)
+            self.assertEqual(self._avisos(), [])
+
+    @override_settings(DEBUG=True)
+    def test_sin_aviso_en_desarrollo(self):
+        self.assertEqual(self._avisos(), [])

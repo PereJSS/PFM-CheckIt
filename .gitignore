@@ -5,3 +5,8 @@ db.sqlite3
 certificados/
 # Worktrees y datos locales de Claude Code
 .claude/
+
+# Claves de firma del PDF: nunca en el repo (se generan con checkIt/generar_certs.py o van como secret file)
+checkIt/certs/
+*.p12
+*.pfx

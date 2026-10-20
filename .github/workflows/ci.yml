@@ -52,6 +52,10 @@ jobs:
       - name: Comprobar migraciones pendientes
         run: python manage.py makemigrations --check --dry-run
 
+      - name: Generar clave de firma efímera
+        # La clave de firma del PDF no está en el repo: los tests firman con una de usar y tirar
+        run: python generar_certs.py
+
       - name: Tests
         run: python manage.py test
 
