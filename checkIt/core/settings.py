@@ -181,7 +181,8 @@ if AWS_STORAGE_BUCKET_NAME:
         },
     }
 # Los tests no escriben en media/ ni necesitan red
-if len(sys.argv) > 1 and sys.argv[1] == 'test':
+TESTING = len(sys.argv) > 1 and sys.argv[1] == 'test'
+if TESTING:
     STORAGES['default'] = {'BACKEND': 'django.core.files.storage.InMemoryStorage'}
 
 # Default primary key field type
@@ -257,6 +258,10 @@ CSRF_TRUSTED_ORIGINS = [
 # Celery
 CELERY_BROKER_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = config('REDIS_URL', default='redis://localhost:6379/0')
+if TESTING:
+    # Lo que un test encola sin parchear se queda en memoria en vez de esperar a Redis
+    CELERY_BROKER_URL = 'memory://'
+    CELERY_RESULT_BACKEND = 'cache+memory://'
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
@@ -307,5 +312,24 @@ if _REDIS_CACHE_URL:
     }
 
 # Sellado de tiempo RFC 3161 (TSA). El timeout se valida en inspecciones/services/tsa.py
+# Perfil "evidencias" (TSA_*): sello de cada foto al subirla.
 TSA_URL = config('TSA_URL', default='https://freetsa.org/tsr')
 TSA_TIMEOUT = config('TSA_TIMEOUT', default='3')
+TSA_USUARIO = config('TSA_USUARIO', default='')
+TSA_PASSWORD = config('TSA_PASSWORD', default='')
+TSA_CERT_CLIENTE = config('TSA_CERT_CLIENTE', default='')  # mTLS: certificado (o PEM con cert + clave)
+TSA_CLAVE_CLIENTE = config('TSA_CLAVE_CLIENTE', default='')
+TSA_CERT = config('TSA_CERT', default='')  # certificado de la TSA para verificar sus tokens
+TSA_POLITICA = config('TSA_POLITICA', default='')  # OID de política, si la TSA lo exige
+TSA_CUALIFICADA = config('TSA_CUALIFICADA', default=False, cast=bool)
+# Perfil "manifiesto" (TSA_MANIFIESTO_*): raíz Merkle de cada inspección y firma del PDF.
+# Sin TSA_MANIFIESTO_URL se usa el perfil "evidencias" entero.
+TSA_MANIFIESTO_URL = config('TSA_MANIFIESTO_URL', default='')
+TSA_MANIFIESTO_TIMEOUT = config('TSA_MANIFIESTO_TIMEOUT', default='10')
+TSA_MANIFIESTO_USUARIO = config('TSA_MANIFIESTO_USUARIO', default='')
+TSA_MANIFIESTO_PASSWORD = config('TSA_MANIFIESTO_PASSWORD', default='')
+TSA_MANIFIESTO_CERT_CLIENTE = config('TSA_MANIFIESTO_CERT_CLIENTE', default='')
+TSA_MANIFIESTO_CLAVE_CLIENTE = config('TSA_MANIFIESTO_CLAVE_CLIENTE', default='')
+TSA_MANIFIESTO_CERT = config('TSA_MANIFIESTO_CERT', default='')
+TSA_MANIFIESTO_POLITICA = config('TSA_MANIFIESTO_POLITICA', default='')
+TSA_MANIFIESTO_CUALIFICADA = config('TSA_MANIFIESTO_CUALIFICADA', default=False, cast=bool)
