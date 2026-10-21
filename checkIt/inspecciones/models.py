@@ -25,6 +25,8 @@ class Inspeccion(models.Model):
     estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
     pdf_estado = models.CharField(max_length=10, choices=PdfEstado.choices, default=PdfEstado.PENDIENTE)
     pdf_ruta = models.CharField(max_length=500, blank=True, null=True)
+    # Raíz del manifiesto que lleva impresa el PDF: el paquete probatorio solo lo usa si es la vigente
+    pdf_manifiesto_raiz = models.CharField(max_length=64, blank=True, null=True, editable=False)
 
     # Manifiesto Merkle: se congela al completar la inspección y se sella solo su raíz
     manifiesto = models.JSONField(blank=True, null=True, editable=False)

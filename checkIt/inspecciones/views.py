@@ -1,3 +1,5 @@
+import hashlib
+import logging
 import re
 
 from rest_framework import viewsets
@@ -14,7 +16,7 @@ from rest_framework.views import APIView
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.permissions import AllowAny
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
 from .models import Evidencia
@@ -36,6 +38,8 @@ ALLOWED_EVIDENCE_MIME_TYPES = {
 AUDIT_TOKEN_SALT = 'checkit.evidence.audit'
 AUDIT_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30  # 30 dias
 
+
+logger = logging.getLogger(__name__)
 
 _is_admin_user = es_admin
 
@@ -60,6 +64,15 @@ def _validate_evidence_file(foto):
         return "La imagen excede el tamaño máximo permitido (8 MB)."
 
     return None
+
+
+def _hash_archivo(archivo):
+    """SHA-256 (hex) de los bytes subidos; deja el archivo al principio para guardarlo."""
+    h = hashlib.sha256()
+    for trozo in archivo.chunks():
+        h.update(trozo)
+    archivo.seek(0)
+    return h.hexdigest()
 
 
 def _build_audit_token(evidencia_id):
@@ -97,6 +110,8 @@ def _can_access_evidence(usuario, evidencia):
 class InspeccionViewSet(viewsets.ModelViewSet):
     queryset: QuerySet[Inspeccion] = cast(QuerySet[Inspeccion], Inspeccion.objects.all())
     serializer_class = InspeccionSerializer
+    # Solo lo fija la acción que lo necesita (paquete-probatorio); sin él, ScopedRateThrottle no limita
+    throttle_scope = None
 
     # Filtramos las inspecciones según el rol del usuario
     def get_queryset(self):  # type: ignore[override]
@@ -255,6 +270,40 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             "pdf_listo": inspeccion.pdf_estado == Inspeccion.PdfEstado.LISTO,
         })
 
+    @extend_schema(
+        summary='Descargar el paquete probatorio (ZIP verificable sin CheckIt)',
+        responses={
+            (200, 'application/zip'): OpenApiTypes.BINARY,
+            403: OpenApiResponse(description='Solo el administrador propietario'),
+            409: OpenApiResponse(description='Falta algo (inspección, sello o PDF) o la integridad no cuadra'),
+        },
+    )
+    @action(detail=True, methods=['get'], url_path='paquete-probatorio',
+            throttle_classes=[ScopedRateThrottle], throttle_scope='paquete')
+    def paquete_probatorio(self, request, pk=None):
+        from .services.paquete import IntegridadRota, PaqueteNoDisponible, construir_paquete, nombre_paquete
+        usuario = request.user
+        # get_object filtra por rol: una inspección ajena da 404, no 403
+        inspeccion = self.get_object()
+        if not (_is_admin_user(usuario) and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk):
+            return Response({"error": "No tienes permisos para descargar el paquete probatorio."}, status=403)
+        try:
+            paquete = construir_paquete(inspeccion)
+        except PaqueteNoDisponible as e:
+            return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+        except IntegridadRota:
+            return Response(
+                {"error": "No se entrega el paquete: la integridad de las fotos no cuadra con el manifiesto sellado."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        logger.info('Paquete probatorio de la inspección %s descargado por el usuario %s', inspeccion.pk, usuario.pk)
+        respuesta = FileResponse(
+            paquete, as_attachment=True, filename=nombre_paquete(inspeccion.pk), content_type='application/zip',
+        )
+        # Lleva datos personales: que no lo guarde ninguna caché intermedia
+        respuesta['Cache-Control'] = 'private, no-store'
+        return respuesta
+
     @action(detail=True, methods=['post'], url_path='evidencias')
     def upload_evidence(self, request, pk=None):
         """POST /api/v1/inspecciones/{id}/evidencias/"""
@@ -290,12 +339,26 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        hash_sha256 = (request.data.get('hash_sha256') or '').strip().lower() or None
+        hash_sha256 = request.data.get('hash_sha256') or ''
+        if not isinstance(hash_sha256, str):
+            return Response(
+                {"error": "hash_sha256 debe ser texto."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hash_sha256 = hash_sha256.strip().lower() or None
         if hash_sha256 and not _HASH_SHA256.match(hash_sha256):
             return Response(
                 {"error": "hash_sha256 debe ser un SHA-256 en hexadecimal (64 caracteres)."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Lo que se sella es el hash de los bytes que se guardan, no el que dice el cliente
+        hash_servidor = _hash_archivo(foto)
+        if hash_sha256 and hash_sha256 != hash_servidor:
+            return Response(
+                {"error": "hash_sha256 no coincide con la foto recibida."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hash_sha256 = hash_servidor
         # La TSA se consulta antes del bloqueo para no retener la fila durante la llamada de red
         tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
 

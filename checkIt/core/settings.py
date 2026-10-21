@@ -212,6 +212,8 @@ REST_FRAMEWORK = {
         # Vistas de gestión del panel de integraciones (por usuario autenticado)
         'integraciones': config('INTEGRACIONES_THROTTLE_RATE', default='120/min'),
         'auditoria': config('AUDIT_THROTTLE_RATE', default='30/min'),
+        # Cada paquete lee todas las fotos del storage: cuota propia y baja
+        'paquete': config('PAQUETE_THROTTLE_RATE', default='10/hour'),
         'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
         'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
         'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),

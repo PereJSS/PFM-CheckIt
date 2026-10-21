@@ -82,6 +82,7 @@ checkIt/
 - El endpoint `claim-report` inicia la generación del PDF (async) o lo descarga si ya está listo; solo el admin propietario de la inspección puede acceder.
 - El endpoint `claim-report-status` permite sondear el estado de generación (PENDIENTE / GENERANDO / LISTO / ERROR).
 - El endpoint de subida de evidencias permite al operario asignado o al admin propietario.
+- El endpoint `paquete-probatorio` solo lo puede usar el admin propietario.
 
 ### Sesión por pestaña
 
@@ -173,6 +174,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `WEBHOOK_THROTTLE_RATE` | No        | Límite del endpoint de webhooks (por defecto `120/min`) |
 | `INTEGRACIONES_THROTTLE_RATE` | No  | Límite de las vistas de gestión del panel de Integraciones (API keys, eventos, destinos, entregas) por usuario (por defecto `120/min`) |
 | `AUDIT_THROTTLE_RATE` | No          | Límite de la auditoría pública por IP (por defecto `30/min`) |
+| `PAQUETE_THROTTLE_RATE` | No        | Límite de descargas del paquete probatorio por usuario (por defecto `10/hour`) |
 | `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
 | `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
 | `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
@@ -292,7 +294,8 @@ Cada propiedad admite un `external_id` opcional (único por admin): el identific
 | DELETE    | /inspecciones/{id}/              | Elimina inspección                   | JWT con alcance por rol                     |
 | GET       | /inspecciones/{id}/claim-report/        | Inicia generación de PDF (202) o descarga si ya está listo (200) | JWT (admin propietario) |
 | GET       | /inspecciones/{id}/claim-report-status/ | Estado del PDF: PENDIENTE / GENERANDO / LISTO / ERROR            | JWT (admin propietario) |
-| POST      | /inspecciones/{id}/evidencias/          | Sube evidencia con hash/TSA opcional                             | JWT (operario asignado o admin propietario) |
+| GET       | /inspecciones/{id}/paquete-probatorio/  | ZIP del expediente verificable sin CheckIt (409 si falta algo)   | JWT (admin propietario) |
+| POST      | /inspecciones/{id}/evidencias/          | Sube evidencia; el servidor calcula su SHA-256 y rechaza un `hash_sha256` que no coincida | JWT (operario asignado o admin propietario) |
 
 ### Auditoría pública
 
@@ -425,6 +428,27 @@ celery -A core worker --loglevel=info
 Al pasar una inspección a `COMPLETADA` se congela su manifiesto: los hashes SHA-256 de sus evidencias ordenados por id y la raíz de su árbol Merkle (RFC 6962: prefijo `0x00` en hojas y `0x01` en nodos). Solo se sella la raíz, con la TSA de `TSA_MANIFIESTO_*`: un sello por inspección en vez de uno por foto. El manifiesto y su token se guardan en la inspección y el PDF muestra la raíz, la hora certificada y si el sello es cualificado. El congelado ocurre en la misma transacción que el cambio de estado y bloquea la fila de la inspección, así que una subida simultánea o entra en el manifiesto o recibe `409`: una inspección completada no admite evidencias nuevas. Si un administrador la reabre, el manifiesto sellado se archiva en `manifiestos_anteriores` y el siguiente completado congela y sella uno nuevo. Cada foto se puede probar después con su ruta de inclusión (`inspecciones/services/merkle.py`).
 
 Cada token TSA, de foto o de manifiesto, se verifica antes de guardarlo: nonce, hash sellado y firma (contra `TSA_CERT` / `TSA_MANIFIESTO_CERT` si están definidos).
+
+El hash de cada foto lo calcula el servidor sobre los bytes que guarda. Si el cliente envía `hash_sha256` y no coincide, la subida se rechaza con `400`. Así, lo que se sella es siempre lo que queda guardado.
+
+### Paquete probatorio
+
+`GET /inspecciones/{id}/paquete-probatorio/` devuelve `CheckIt_Expediente_{id}.zip`, pensado para un abogado, un perito o una aseguradora. Se puede verificar sin CheckIt:
+
+| Archivo | Contenido |
+|---|---|
+| `informe_firmado.pdf` | Acta firmada (PAdES-B-T) |
+| `evidencias/NNN_ev{id}.*` | Foto original, con los mismos bytes que se sellaron |
+| `evidencias/NNN_ev{id}.tst` | Sello RFC 3161 de la foto (`TimeStampToken`), si lo tiene |
+| `evidencias/NNN_ev{id}.prueba.json` | Ruta de inclusión de la foto hasta la raíz del manifiesto |
+| `manifiesto/manifiesto.json` y `raiz.tst` | Manifiesto congelado y sello de su raíz |
+| `manifiestos_anteriores/` | Manifiestos sellados antes de reabrir la inspección |
+| `certificados_tsa/` | Certificados de TSA fijados en `TSA_CERT` / `TSA_MANIFIESTO_CERT`, si los hay |
+| `expediente.json`, `LEEME.txt` | Resumen e instrucciones de verificación (comandos de `openssl ts -verify`) |
+| `verificar.py` | Script que solo usa la biblioteca estándar: comprueba hashes, raíz e inclusión |
+| `SHA256SUMS` | Hash de cada archivo (`sha256sum -c SHA256SUMS`) |
+
+Para generarlo, la inspección tiene que estar completada, con el manifiesto sellado y el PDF listo. Si falta algo, el endpoint responde `409` con el motivo. Se construye bajo demanda y no se guarda. Antes de entregarlo se recalcula el hash de cada foto: si alguna no coincide con el manifiesto sellado, responde `409` y registra un error. Si el storage no responde, también da `409`, pero con un mensaje de reintento y sin hablar de integridad. El PDF tiene que llevar la raíz vigente (`pdf_manifiesto_raiz`): al reabrir una inspección, su PDF vuelve a `PENDIENTE`. `verificar.py` también comprueba que cada `.tst` sella la raíz o la foto que le corresponde. La firma de los sellos se comprueba con `verificar_sellos.sh` (openssl). El `LEEME.txt` solo habla de sello cualificado cuando lo es (`TSA_MANIFIESTO_CUALIFICADA`).
 
 ### Re-sellado TSA periódico (Celery beat)
 

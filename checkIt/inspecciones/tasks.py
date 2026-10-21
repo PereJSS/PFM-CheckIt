@@ -35,9 +35,16 @@ def generar_pdf_async(self, inspeccion_id):
             pdf_signer.firmar_pdf_reclamacion(input_pdf, ruta_firmada)
             pdf_ruta = guardar_pdf(inspeccion.pk, ruta_firmada)
 
-        inspeccion.pdf_estado = Inspeccion.PdfEstado.LISTO
-        inspeccion.pdf_ruta = pdf_ruta
-        inspeccion.save(update_fields=['pdf_estado', 'pdf_ruta'])
+        # Solo si la raíz no cambió durante la generación (p. ej., por una reapertura)
+        raiz = inspeccion.manifiesto_raiz
+        guardado = Inspeccion.objects.filter(pk=inspeccion.pk, manifiesto_raiz=raiz).update(
+            pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_ruta=pdf_ruta, pdf_manifiesto_raiz=raiz,
+        )
+        if not guardado:
+            logger.warning('La inspección %s cambió mientras se generaba su PDF: se descarta', inspeccion.pk)
+            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.GENERANDO).update(
+                pdf_estado=Inspeccion.PdfEstado.PENDIENTE,
+            )
     except Exception as exc:
         inspeccion.pdf_estado = Inspeccion.PdfEstado.ERROR
         inspeccion.save(update_fields=['pdf_estado'])

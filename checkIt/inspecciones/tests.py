@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 from io import BytesIO
@@ -251,10 +252,12 @@ class UploadEvidenceTest(APITestCase):
     @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
     def test_hash_stored_and_tsa_called_when_hash_provided(self, mock_tsa):
         self.client.force_authenticate(user=self.op)
-        test_hash = 'a' * 64
+        foto = _make_image()
+        test_hash = hashlib.sha256(foto.read()).hexdigest()
+        foto.seek(0)
         response = self.client.post(
             self._url(self.insp.pk),
-            {'foto': _make_image(), 'hash_sha256': test_hash},
+            {'foto': foto, 'hash_sha256': test_hash.upper()},
             format='multipart',
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -263,12 +266,45 @@ class UploadEvidenceTest(APITestCase):
         mock_tsa.assert_called_once_with(test_hash)
 
     @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
-    def test_tsa_not_called_without_hash(self, mock_tsa):
+    def test_hash_que_no_coincide_con_la_foto_se_rechaza(self, mock_tsa):
         self.client.force_authenticate(user=self.op)
-        self.client.post(
-            self._url(self.insp.pk), {'foto': _make_image()}, format='multipart'
+        response = self.client.post(
+            self._url(self.insp.pk),
+            {'foto': _make_image(), 'hash_sha256': 'a' * 64},
+            format='multipart',
         )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Evidencia.objects.exists())
         mock_tsa.assert_not_called()
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_hash_enviado_como_archivo_da_400(self, mock_tsa):
+        self.client.force_authenticate(user=self.op)
+        response = self.client.post(
+            self._url(self.insp.pk),
+            {'foto': _make_image(), 'hash_sha256': SimpleUploadedFile('h.txt', b'a' * 64)},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_tsa.assert_not_called()
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_sin_hash_el_servidor_lo_calcula_y_lo_sella(self, mock_tsa):
+        self.client.force_authenticate(user=self.op)
+        foto = _make_image()
+        esperado = hashlib.sha256(foto.read()).hexdigest()
+        foto.seek(0)
+        self.client.post(self._url(self.insp.pk), {'foto': foto}, format='multipart')
+        self.assertEqual(Evidencia.objects.get().hash_sha256, esperado)
+        mock_tsa.assert_called_once_with(esperado)
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_la_foto_guardada_es_la_del_hash(self, _):
+        self.client.force_authenticate(user=self.op)
+        self.client.post(self._url(self.insp.pk), {'foto': _make_image()}, format='multipart')
+        evidencia = Evidencia.objects.get()
+        with evidencia.foto.open('rb') as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), evidencia.hash_sha256)
 
     def test_invalid_mime_type_rejected(self):
         self.client.force_authenticate(user=self.op)

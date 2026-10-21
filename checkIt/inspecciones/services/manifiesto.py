@@ -37,6 +37,8 @@ _CAMPOS_VACIOS = {
     'manifiesto_tsa_cualificada': False,
     'manifiesto_tsa_verificado': False,
     'manifiesto_tsa_ultimo_intento': None,
+    # El PDF del completado anterior no describe la inspección reabierta
+    'pdf_estado': Inspeccion.PdfEstado.PENDIENTE,
 }
 
 

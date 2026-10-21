@@ -19,6 +19,20 @@ const ESTADO = {
   },
 };
 
+// Descargas de una inspección completada: endpoint, nombre por defecto y texto del error.
+const DESCARGAS = {
+  pdf: {
+    ruta: "claim-report",
+    nombre: (id) => `Reclamacion_CheckIt_${id}.pdf`,
+    error: "el informe",
+  },
+  paquete: {
+    ruta: "paquete-probatorio",
+    nombre: (id) => `CheckIt_Expediente_${id}.zip`,
+    error: "el paquete probatorio",
+  },
+};
+
 // Valores iniciales para resetear formularios sin repetir objetos literales.
 const FORM_EMPTY = { propiedad: "", operario: "" };
 const PROP_EMPTY = {
@@ -130,15 +144,16 @@ export default function AdminPage() {
     return fallbackName;
   };
 
-  // Solicita al backend el PDF firmado y fuerza descarga en navegador.
-  const handleDownloadPDF = async (id) => {
-    setDownloading(id);
+  // Solicita al backend el PDF firmado o el paquete probatorio y fuerza descarga en navegador.
+  const handleDownload = async (id, tipo) => {
+    const descarga = DESCARGAS[tipo];
+    setDownloading(`${tipo}-${id}`);
     try {
-      const response = await api.get(`/inspecciones/${id}/claim-report/`, {
+      const response = await api.get(`/inspecciones/${id}/${descarga.ruta}/`, {
         responseType: "blob",
       });
       const blob = response.data;
-      const fallbackName = `Reclamacion_CheckIt_${id}.pdf`;
+      const fallbackName = descarga.nombre(id);
       const filename = getDownloadFilename(response.headers, fallbackName);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -163,7 +178,7 @@ export default function AdminPage() {
         }
       }
 
-      alert("Error al descargar el informe: " + backendMessage);
+      alert(`Error al descargar ${descarga.error}: ${backendMessage}`);
     } finally {
       setDownloading(null);
     }
@@ -488,15 +503,27 @@ export default function AdminPage() {
                         </td>
                         <td className="px-5 py-3.5">
                           {insp.estado === "COMPLETADA" ? (
-                            <button
-                              onClick={() => handleDownloadPDF(insp.id)}
-                              disabled={downloading === insp.id}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
-                            >
-                              {downloading === insp.id
-                                ? "Generando…"
-                                : "Descargar PDF"}
-                            </button>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={() => handleDownload(insp.id, "pdf")}
+                                disabled={downloading === `pdf-${insp.id}`}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
+                              >
+                                {downloading === `pdf-${insp.id}`
+                                  ? "Generando…"
+                                  : "Descargar PDF"}
+                              </button>
+                              <button
+                                onClick={() => handleDownload(insp.id, "paquete")}
+                                disabled={downloading === `paquete-${insp.id}`}
+                                title="ZIP con las fotos originales, los sellos de tiempo, el manifiesto y el PDF, verificable sin CheckIt"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-blue-700 text-xs font-semibold ring-1 ring-blue-200 hover:bg-blue-50 disabled:opacity-50 transition"
+                              >
+                                {downloading === `paquete-${insp.id}`
+                                  ? "Preparando…"
+                                  : "Paquete probatorio"}
+                              </button>
+                            </div>
                           ) : (
                             <span className="text-slate-400 text-xs italic">
                               Pendiente de operario
