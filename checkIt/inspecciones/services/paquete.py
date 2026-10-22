@@ -156,6 +156,10 @@ def _añadir_evidencias(paquete, inspeccion):
             'evidencia': evidencia.pk,
             'archivo': archivo,
             'descripcion': evidencia.descripcion or '',
+            # Declarada por el dispositivo: fuera del manifiesto y sin sello
+            'capturada_en': _iso(evidencia.capturada_en),
+            'capturada_en_certificada': False,
+            'avisos_hora': evidencia.avisos_hora(),
             'fecha_captura': _iso(evidencia.fecha_captura),
             'sha256': hoja['sha256'],
             'indice': indice,
@@ -310,6 +314,13 @@ Cada foto tiene un hash SHA-256. Ese hash es una hoja del manifiesto, y su prueb
 inclusión lleva hasta la raíz {raiz}.
 La TSA selló esa raíz en una fecha concreta, así que ninguna foto se pudo cambiar,
 añadir ni quitar después de esa fecha sin que la verificación falle.
+
+Las horas de cada foto (expediente.json) no valen lo mismo:
+- tsa_timestamp: la da la TSA. Prueba que la foto ya existía a esa hora.
+- fecha_captura: la hora en que el servidor de CheckIt recibió la foto.
+- capturada_en: la hora que declara el dispositivo al hacer la foto. Nadie la
+  certifica: el reloj del móvil puede estar mal o haberse cambiado. Solo es creíble
+  si es anterior a las otras dos y no muy lejana.
 
 CÓMO VERIFICARLO
 El paso decisivo es el 2: la firma de la TSA sobre la raíz no la puede rehacer quien

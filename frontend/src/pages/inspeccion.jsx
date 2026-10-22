@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import InspectionForm from "../components/inspectionForm";
 import api from "../services/api";
 import { syncPendingEvidences } from "../services/offline";
+import { horaDeArchivo } from "../utils/hora";
 import { clearAuthTokens } from "../services/authStorage";
 
 // Diccionarios para mostrar estado con etiqueta legible y estilo visual consistente.
@@ -57,6 +58,15 @@ export default function InspectionPage() {
 
         if (evidence.hash) {
           formData.append("hash_sha256", evidence.hash);
+        }
+        // capturedAt null = archivo elegido, sin hora fiable. Las guardadas antes
+        // del #29 no tienen la clave: el archivo conserva su lastModified.
+        const capturedAt =
+          "capturedAt" in evidence
+            ? evidence.capturedAt
+            : horaDeArchivo(evidence.file);
+        if (capturedAt) {
+          formData.append("capturada_en", capturedAt);
         }
 
         await api.post(

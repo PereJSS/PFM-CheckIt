@@ -61,12 +61,26 @@ class Evidencia(models.Model):
     inspeccion = models.ForeignKey(Inspeccion, on_delete=models.CASCADE, related_name="evidencias")
     foto = models.ImageField(upload_to="evidencias/")
     descripcion = models.TextField(blank=True, null=True)
+    # Pese al nombre, es la hora en que el servidor recibió la foto
     fecha_captura = models.DateTimeField(auto_now_add=True)
+    # Hora de la foto según el dispositivo: la declara el cliente, nadie la certifica
+    capturada_en = models.DateTimeField(blank=True, null=True, verbose_name="Capturada (según el dispositivo)")
     hash_sha256 = models.CharField(max_length=64, blank=True, null=True, verbose_name="Hash SHA-256")
     tsa_timestamp = models.DateTimeField(blank=True, null=True, verbose_name="Timestamp TSA")
     tsa_token = models.BinaryField(blank=True, null=True, verbose_name="Token TSA (.tsr)")
     # Último intento de re-sellado (tarea periódica): rota la cola de pendientes
     tsa_ultimo_intento = models.DateTimeField(blank=True, null=True, editable=False)
+
+    def avisos_hora(self):
+        """Incoherencias de la hora que declara el dispositivo con las que sí controla CheckIt."""
+        if not self.capturada_en:
+            return []
+        avisos = []
+        if self.capturada_en < self.inspeccion.fecha_creacion:
+            avisos.append('anterior al inicio de la inspección')
+        if self.fecha_captura and self.capturada_en > self.fecha_captura:
+            avisos.append('posterior a la recepción')
+        return avisos
 
     class Meta:
         indexes = [

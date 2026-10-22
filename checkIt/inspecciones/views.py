@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from rest_framework import viewsets
 from rest_framework import status
@@ -23,6 +24,8 @@ from .models import Evidencia
 from django.http import HttpResponse
 from django.db import transaction
 from django.db.models import QuerySet
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from typing import cast
 from users.permissions import es_admin
 
@@ -64,6 +67,34 @@ def _validate_evidence_file(foto):
         return "La imagen excede el tamaño máximo permitido (8 MB)."
 
     return None
+
+
+# Margen para relojes de móvil algo adelantados
+MARGEN_RELOJ_DISPOSITIVO = timedelta(minutes=5)
+# Un reloj sin configurar (1970, 2000…) no es una hora de captura
+CAPTURA_MAS_ANTIGUA = datetime(2000, 1, 1, tzinfo=dt_timezone.utc)
+
+
+def _capturada_en(valor):
+    """Hora de captura que declara el dispositivo (opcional). Devuelve (fecha, error)."""
+    if valor in (None, ''):
+        return None, None
+    try:
+        fecha = parse_datetime(valor) if isinstance(valor, str) else None
+    except ValueError:  # bien formada pero imposible (p. ej. mes 13)
+        fecha = None
+    if fecha is None or timezone.is_naive(fecha):
+        return None, "capturada_en debe ser una fecha ISO 8601 con zona horaria."
+    try:
+        # En UTC ya: un año 1 con offset positivo desborda al guardarse
+        fecha = fecha.astimezone(dt_timezone.utc)
+    except OverflowError:
+        return None, "capturada_en está fuera de rango."
+    if fecha < CAPTURA_MAS_ANTIGUA:
+        return None, "capturada_en está fuera de rango."
+    if fecha > timezone.now() + MARGEN_RELOJ_DISPOSITIVO:
+        return None, "capturada_en no puede ser posterior a la hora actual."
+    return fecha, None
 
 
 def _hash_archivo(archivo):
@@ -359,6 +390,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         hash_sha256 = hash_servidor
+        capturada_en, error = _capturada_en(request.data.get('capturada_en'))
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         # La TSA se consulta antes del bloqueo para no retener la fila durante la llamada de red
         tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
 
@@ -376,6 +410,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 foto=foto,
                 descripcion=request.data.get('descripcion') or '',
                 hash_sha256=hash_sha256,
+                capturada_en=capturada_en,
                 tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
                 tsa_token=tsa_data.get('token') if tsa_data else None,
             )
@@ -391,6 +426,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 "audit_token": _build_audit_token(evidencia.pk),
                 "foto": evidencia.foto.url if evidencia.foto else None,
                 "fecha_captura": evidencia.fecha_captura,
+                "capturada_en": evidencia.capturada_en,
             },
             status=status.HTTP_201_CREATED,
         )

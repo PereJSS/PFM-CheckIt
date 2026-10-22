@@ -164,6 +164,11 @@ class PaqueteContenidoTest(_ConExpediente, TestCase):
         self.assertEqual(len(datos['evidencias']), 2)
         self.assertEqual(datos['evidencias'][0]['sha256'], hashlib.sha256(self.fotos[0].datos).hexdigest())
         self.assertEqual(datos['avisos'], [])
+        # #29: la hora del dispositivo va aparte de la de recepción y la del sello
+        self.assertIn('capturada_en', datos['evidencias'][0])
+        self.assertIn('fecha_captura', datos['evidencias'][0])
+        self.assertIs(datos['evidencias'][0]['capturada_en_certificada'], False)
+        self.assertEqual(datos['evidencias'][0]['avisos_hora'], [])
 
     def test_leeme_no_presenta_como_cualificado_un_sello_que_no_lo_es(self):
         leeme = self._zip().read('LEEME.txt').decode()
@@ -171,6 +176,7 @@ class PaqueteContenidoTest(_ConExpediente, TestCase):
         self.assertIn('openssl ts -verify', leeme)
         self.assertIn(self.inspeccion.manifiesto_raiz, leeme)
         self.assertIn('DATOS PERSONALES', leeme)
+        self.assertIn('Nadie la\n  certifica', leeme)
 
     def test_leeme_dice_cualificado_solo_si_lo_es(self):
         Inspeccion.objects.filter(pk=self.inspeccion.pk).update(manifiesto_tsa_cualificada=True)

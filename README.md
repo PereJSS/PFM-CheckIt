@@ -438,6 +438,16 @@ Cada token TSA, de foto o de manifiesto, se verifica antes de guardarlo: nonce, 
 
 El hash de cada foto lo calcula el servidor sobre los bytes que guarda. Si el cliente envía `hash_sha256` y no coincide, la subida se rechaza con `400`. Así, lo que se sella es siempre lo que queda guardado.
 
+**Tres horas por foto** (#29). El sello marca la subida, no la captura, así que cada evidencia guarda tres horas distintas y el PDF y el paquete dicen quién da cada una:
+
+| Campo | Quién la da | Qué prueba |
+| --- | --- | --- |
+| `capturada_en` | El dispositivo (campo opcional de la subida, ISO 8601 con zona) | Nada por sí sola: el reloj del móvil se puede cambiar. Se rechaza si va más de 5 min por delante del servidor o es anterior a 2000 |
+| `fecha_captura` | El servidor de CheckIt al recibir la foto | Cuándo llegó |
+| `tsa_timestamp` | La TSA (RFC 3161) | Que la foto ya existía a esa hora |
+
+El PDF y `expediente.json` (`avisos_hora`) marcan la hora del dispositivo si es anterior al inicio de la inspección o posterior a la recepción. La app manda `capturada_en` desde el `lastModified` del archivo que crea la cámara (no lo manda para un archivo elegido de la galería, cuyo `lastModified` no es la hora de la foto), y la conserva en la cola offline: una foto hecha sin cobertura y subida horas después muestra las dos horas, en vez de aparentar que se hizo al subirla.
+
 ### Paquete probatorio
 
 `GET /inspecciones/{id}/paquete-probatorio/` devuelve `CheckIt_Expediente_{id}.zip`, pensado para un abogado, un perito o una aseguradora. Se puede verificar sin CheckIt:

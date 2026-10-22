@@ -2,6 +2,7 @@ import io
 import os
 from datetime import datetime
 from urllib.parse import urlparse
+from xml.sax.saxutils import escape
 
 from django.utils.timezone import localtime, now as tz_now
 from reportlab.lib import colors
@@ -243,6 +244,27 @@ def _host(url):
     return urlparse(url).hostname or url or '—'
 
 
+def _horas_evidencia(ev):
+    """Las tres horas de una evidencia y quién da cada una (#29): el sello prueba que la
+    foto existía a esa hora; la de captura solo la declara el dispositivo."""
+    def hora(fecha):
+        return localtime(fecha).strftime('%d/%m/%Y %H:%M:%S %Z')
+
+    partes = []
+    if ev.capturada_en:
+        partes.append(f'Capturada {hora(ev.capturada_en)} (según el dispositivo)')
+    partes.append(f'Recibida {hora(ev.fecha_captura)} (servidor de CheckIt)')
+    if ev.tsa_timestamp:
+        partes.append(f'Sello TSA {hora(ev.tsa_timestamp)} (RFC 3161)')
+    else:
+        partes.append('Sello TSA pendiente')
+    texto = ' · '.join(partes)
+    avisos = ev.avisos_hora()
+    if avisos:
+        texto += f' · <b>Atención: hora del dispositivo {" y ".join(avisos)}</b>'
+    return texto
+
+
 def _seccion_manifiesto(inspeccion, s):
     """Raíz Merkle de la inspección y su sello de tiempo, o el motivo por el que falta."""
     flowables = [Paragraph('Manifiesto Merkle de la Inspección (RFC 6962)', s['h2'])]
@@ -322,12 +344,15 @@ def generar_informe_base(inspeccion, output_path=None):
     if not evidencias:
         story.append(Paragraph('No se registraron evidencias en esta inspección.', s['value']))
     else:
+        story.append(Paragraph(
+            'Solo el sello TSA prueba que cada foto existía a esa hora. La hora de captura la '
+            'declara el dispositivo y nadie la certifica.', s['small'],
+        ))
         for idx, ev in enumerate(evidencias, start=1):
-            story.append(Paragraph(
-                f'<b>Evidencia #{idx}</b> · {ev.fecha_captura.strftime("%d/%m/%Y %H:%M")}',
-                s['value'],
-            ))
-            story.append(Paragraph(ev.descripcion or 'Sin descripción', s['small']))
+            story.append(Paragraph(f'<b>Evidencia #{idx}</b>', s['value']))
+            story.append(Paragraph(_horas_evidencia(ev), s['small']))
+            # Texto del operario: escapado, Paragraph interpreta marcado
+            story.append(Paragraph(escape(ev.descripcion or 'Sin descripción'), s['small']))
 
             imagen = _leer_foto(ev)
             if imagen is None:

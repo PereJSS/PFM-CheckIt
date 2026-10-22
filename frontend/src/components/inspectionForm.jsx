@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { calculateSHA256 } from "../utils/hash";
+import { horaDeArchivo } from "../utils/hora";
 import {
   getPendingEvidencesByInspection,
   saveEvidenceOffline,
@@ -201,6 +202,7 @@ function CameraModal({ onCapture, onClose }) {
       (blob) => {
         const file = new File([blob], `evidencia_${Date.now()}.jpg`, {
           type: "image/jpeg",
+          lastModified: Date.now(),
         });
         onCapture(file);
       },
@@ -212,7 +214,8 @@ function CameraModal({ onCapture, onClose }) {
   // Fallback de carga manual cuando la cámara no puede abrirse.
   const handleFileChange = (e) => {
     const file = e.target.files[0];
-    if (file) onCapture(file);
+    // Archivo elegido (galería, disco): su lastModified no es la hora de la foto
+    if (file) onCapture(file, { desdeCamara: false });
   };
 
   return (
@@ -318,7 +321,7 @@ export default function InspectionForm({ inspectionId }) {
       navigator.maxTouchPoints > 1);
 
   // Procesa archivo: calcula hash, intenta subir online y si falla guarda offline.
-  const processFile = async (file) => {
+  const processFile = async (file, { desdeCamara = true } = {}) => {
     setCameraOpen(false);
     setStatus({ type: "loading", text: "Calculando huella SHA-256…" });
 
@@ -333,11 +336,15 @@ export default function InspectionForm({ inspectionId }) {
     try {
       // Hash local para trazabilidad e integridad de la evidencia.
       const hash = await calculateSHA256(file);
+      // Hora de la foto según el dispositivo (#29): lastModified la fija la cámara
+      // al crear el archivo; el servidor la guarda como dato declarado, no certificado.
+      const capturedAt = desdeCamara ? horaDeArchivo(file) : null;
 
       const formData = new FormData();
       formData.append("foto", file);
       formData.append("descripcion", description || `${room}`);
       formData.append("hash_sha256", hash);
+      if (capturedAt) formData.append("capturada_en", capturedAt);
 
       try {
         await api.post(`/inspecciones/${inspectionId}/evidencias/`, formData);
@@ -353,6 +360,7 @@ export default function InspectionForm({ inspectionId }) {
           description,
           hash,
           file,
+          capturedAt,
           timestamp: new Date().toISOString(),
           synced: false,
         });
