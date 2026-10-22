@@ -13,10 +13,10 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
-from asn1crypto import keys as asn1_keys, tsp, x509 as asn1_x509
+from asn1crypto import algos as asn1_algos, cms as asn1_cms, keys as asn1_keys, tsp, x509 as asn1_x509
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from django.test import TestCase, override_settings
 from pyhanko.sign.timestamps.dummy_client import DummyTimeStamper
@@ -35,8 +35,11 @@ from .tests import _make_image
 # TSA de pruebas
 # ---------------------------------------------------------------------------
 
-def _certificado(nombre, eku=None):
-    clave = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def _certificado(nombre, eku=None, algoritmo='rsa'):
+    if algoritmo == 'ec':
+        clave = ec.generate_private_key(ec.SECP384R1())
+    else:
+        clave = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     sujeto = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, nombre)])
     ahora = datetime.datetime.now(datetime.timezone.utc)
     builder = (
@@ -53,16 +56,38 @@ def _certificado(nombre, eku=None):
     return clave, builder.sign(clave, hashes.SHA256())
 
 
-def _crear_tsa(nombre='TSA de pruebas'):
-    """TSA efímera con EKU timeStamping. Devuelve (certificado PEM, DummyTimeStamper)."""
-    clave, cert = _certificado(nombre, ExtendedKeyUsageOID.TIME_STAMPING)
-    der_clave = clave.private_bytes(
+def _der_pkcs8(clave):
+    return asn1_keys.PrivateKeyInfo.load(clave.private_bytes(
         serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
-    )
-    dummy = DummyTimeStamper(
-        tsa_cert=asn1_x509.Certificate.load(cert.public_bytes(serialization.Encoding.DER)),
-        tsa_key=asn1_keys.PrivateKeyInfo.load(der_clave),
-    )
+    ))
+
+
+class _DummyTimeStamperEC(DummyTimeStamper):
+    """El DummyTimeStamper de pyHanko solo firma con RSA: este construye el token igual
+    (con una clave RSA desechable) y vuelve a firmar los atributos firmados con ECDSA."""
+
+    def __init__(self, tsa_cert, clave_ec):
+        super().__init__(tsa_cert=tsa_cert, tsa_key=_der_pkcs8(
+            rsa.generate_private_key(public_exponent=65537, key_size=2048)))
+        self.clave_ec = clave_ec
+
+    def request_tsa_response(self, req):
+        resp = tsp.TimeStampResp.load(super().request_tsa_response(req).dump())
+        signer = resp['time_stamp_token']['content']['signer_infos'][0]
+        atributos = asn1_cms.CMSAttributes(list(signer['signed_attrs'])).dump()
+        signer['signature'] = self.clave_ec.sign(atributos, ec.ECDSA(hashes.SHA256()))
+        signer['signature_algorithm'] = asn1_algos.SignedDigestAlgorithm({'algorithm': 'sha256_ecdsa'})
+        return tsp.TimeStampResp.load(resp.dump(force=True))
+
+
+def _crear_tsa(nombre='TSA de pruebas', algoritmo='rsa'):
+    """TSA efímera con EKU timeStamping. Devuelve (certificado PEM, DummyTimeStamper)."""
+    clave, cert = _certificado(nombre, ExtendedKeyUsageOID.TIME_STAMPING, algoritmo)
+    cert_asn1 = asn1_x509.Certificate.load(cert.public_bytes(serialization.Encoding.DER))
+    if algoritmo == 'ec':
+        dummy = _DummyTimeStamperEC(cert_asn1, clave)
+    else:
+        dummy = DummyTimeStamper(tsa_cert=cert_asn1, tsa_key=_der_pkcs8(clave))
     return cert.public_bytes(serialization.Encoding.PEM), dummy
 
 
@@ -206,6 +231,58 @@ class TSAVerificadaTest(TestCase):
         rechazo = bytes.fromhex('30053003020102')
         with patch('inspecciones.services.tsa.requests.post', return_value=_respuesta_http(rechazo)):
             with self.assertLogs('inspecciones.services.tsa', level='WARNING'):
+                self.assertIsNone(self._solicitar(HASH_A))
+
+
+class TSAVerificadaECTest(TSAVerificadaTest):
+    """Las mismas comprobaciones con una TSA que firma con curva elíptica (como FreeTSA
+    desde oct. 2026): rfc3161ng solo verificaba RSA y rechazaba todos los sellos."""
+
+    def setUp(self):
+        self.pem, self.dummy = _crear_tsa(algoritmo='ec')
+        self.ruta_cert = _guardar_pem(self, self.pem)
+
+    def _sellar_y_alterar(self, alterar):
+        """Sella con la TSA EC y altera el token antes de devolverlo."""
+        dummy = self.dummy
+
+        def fake_post(url, data=None, **kwargs):
+            res = asyncio.run(dummy.async_request_tsa_response(tsp.TimeStampReq.load(data)))
+            res = tsp.TimeStampResp.load(res.dump())
+            alterar(res['time_stamp_token']['content'])
+            return _respuesta_http(res.dump(force=True))
+        with patch('inspecciones.services.tsa.requests.post', side_effect=fake_post), \
+                self.settings(TSA_CERT=self.ruta_cert):
+            with self.assertLogs('inspecciones.services.tsa', level='ERROR'):
+                return self._solicitar(HASH_A)
+
+    def test_rechaza_firma_ec_manipulada(self):
+        def cambiar_firma(signed_data):
+            signer = signed_data['signer_infos'][0]
+            firma = bytearray(signer['signature'].native)
+            firma[-1] ^= 1
+            signer['signature'] = bytes(firma)
+        self.assertIsNone(self._sellar_y_alterar(cambiar_firma))
+
+    def test_rechaza_tstinfo_cambiado_tras_firmar(self):
+        def cambiar_tstinfo(signed_data):
+            from asn1crypto import tsp as asn1_tsp
+            info = asn1_tsp.TSTInfo.load(signed_data['encap_content_info']['content'].native.dump())
+            info['serial_number'] = info['serial_number'].native + 1
+            signed_data['encap_content_info']['content'] = asn1_cms.ParsableOctetString(info.dump())
+        self.assertIsNone(self._sellar_y_alterar(cambiar_tstinfo))
+
+    def test_rechaza_dos_firmantes(self):
+        def duplicar_firmante(signed_data):
+            signer = signed_data['signer_infos'][0]
+            signed_data['signer_infos'] = [signer, asn1_cms.SignerInfo.load(signer.dump())]
+        self.assertIsNone(self._sellar_y_alterar(duplicar_firmante))
+
+    def test_rechaza_token_de_otra_tsa_ec(self):
+        _, otra = _crear_tsa('TSA impostora', algoritmo='ec')
+        with patch('inspecciones.services.tsa.requests.post', side_effect=_post_con_tsa(otra)), \
+                self.settings(TSA_CERT=self.ruta_cert):
+            with self.assertLogs('inspecciones.services.tsa', level='ERROR'):
                 self.assertIsNone(self._solicitar(HASH_A))
 
 

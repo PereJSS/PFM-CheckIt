@@ -22,11 +22,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import rfc3161ng
+import rfc3161ng.api as rfc3161ng_api
 from celery.exceptions import SoftTimeLimitExceeded
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from django.conf import settings
-from pyasn1.codec.der import encoder as der_encoder
+from pyasn1.codec.der import decoder as der_decoder, encoder as der_encoder
+from pyasn1.type import univ
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,63 @@ def _validar_cert_fijado(cert_bytes, gen_time):
         raise ValueError('el certificado de la TSA no era válido en la hora del sello')
 
 
+_HASHES_ADMITIDOS = {'sha256', 'sha384', 'sha512'}
+
+
+def _comprobar_sello(tst, certificado, digest, nonce, data=None):
+    """Lo mismo que rfc3161ng.check_timestamp, pero verificando la firma según el tipo de
+    clave de la TSA: rfc3161ng solo admite RSA y FreeTSA firma con curva elíptica desde
+    octubre de 2026. Lanza ValueError (o InvalidSignature) si algo no cuadra."""
+    if digest is None:
+        digest = hashlib.sha256(data or b'').digest()
+    signed_data = tst.content
+    cert = rfc3161ng_api.load_certificate(signed_data, certificado)
+    if int(tst.tst_info['nonce']) != int(nonce):
+        raise ValueError('nonce distinto o ausente')
+    imprint = tst.tst_info.message_imprint
+    if imprint.hash_algorithm[0] != rfc3161ng_api.get_hash_oid('sha256') or bytes(imprint.hashed_message) != digest:
+        raise ValueError('la huella sellada no es la del documento')
+    if len(signed_data['signerInfos']) != 1:
+        # Otro verificador (openssl, el perito) podría mirar un firmante distinto
+        raise ValueError('el token debe tener exactamente una firma')
+    signer_info = signed_data['signerInfos'][0]
+    if tst.content['contentInfo']['contentType'] != rfc3161ng.id_ct_TSTInfo:
+        raise ValueError('el contenido firmado no es un TSTInfo')
+
+    contenido = bytes(der_decoder.decode(
+        bytes(tst.content['contentInfo']['content']), asn1Spec=univ.OctetString())[0])
+    algoritmo = signer_info['digestAlgorithm']['algorithm']
+    clase_hash = rfc3161ng_api.get_hash_class_from_oid(algoritmo)
+    nombre_hash = rfc3161ng_api.get_hash_from_oid(algoritmo)
+    if nombre_hash not in _HASHES_ADMITIDOS:
+        raise ValueError(f'hash de la firma no admitido: {nombre_hash}')
+    atributos = signer_info['authenticatedAttributes']
+    if not len(atributos):
+        # RFC 5652: sin atributos firmados la firma cubre el contenido. Las TSA siempre los
+        # ponen y validarlos así abre más superficie: se rechaza
+        raise ValueError('token sin atributos firmados')
+    digests = [a for a in atributos if a[0] == rfc3161ng_api.id_attribute_messageDigest]
+    if len(digests) != 1:
+        raise ValueError('el token debe llevar exactamente un messageDigest firmado')
+    firmado = bytes(der_decoder.decode(bytes(digests[0][1][0]), asn1Spec=univ.OctetString())[0])
+    if firmado != clase_hash(contenido).digest():
+        raise ValueError('el messageDigest firmado no corresponde al TSTInfo')
+    conjunto = univ.SetOf()
+    for i, atributo in enumerate(atributos):
+        conjunto.setComponentByPosition(i, atributo)
+    datos_firmados = der_encoder.encode(conjunto)
+
+    firma = bytes(signer_info['encryptedDigest'])
+    algoritmo_hash = getattr(hashes, nombre_hash.upper())()
+    clave = cert.public_key()
+    if isinstance(clave, rsa.RSAPublicKey):
+        clave.verify(firma, datos_firmados, padding.PKCS1v15(), algoritmo_hash)
+    elif isinstance(clave, ec.EllipticCurvePublicKey):
+        clave.verify(firma, datos_firmados, ec.ECDSA(algoritmo_hash))
+    else:
+        raise ValueError(f'tipo de clave de la TSA no admitido: {type(clave).__name__}')
+
+
 def _digest_y_datos(evidencia_hash):
     # Si llega un hash hexadecimal válido (64 chars), lo usamos como digest real.
     # Si no, hacemos fallback a data bytes para no romper flujo de negocio.
@@ -212,14 +273,7 @@ def solicitar_sello_tiempo(evidencia_hash, perfil=PERFIL_EVIDENCIAS):
         cert_tsa = _leer_cert_tsa(conf['cert_tsa'])
         try:
             # Sin certificado fijado (b''), valida contra el que trae el token
-            rfc3161ng.check_timestamp(
-                tst,
-                certificate=cert_tsa or b'',
-                data=data,
-                digest=digest,
-                hashname='sha256',
-                nonce=nonce,
-            )
+            _comprobar_sello(tst, cert_tsa or b'', digest, nonce, data)
             if cert_tsa:
                 _validar_cert_fijado(cert_tsa, timestamp)
         except Exception as err:
