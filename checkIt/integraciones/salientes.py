@@ -5,6 +5,7 @@ PDF listo). Firma HMAC-SHA256 del cuerpo y protección SSRF:
 - La IP se valida al conectar y la conexión se fija a esa IP (sin DNS rebinding),
   manteniendo SNI y verificación del certificado con el hostname original.
 """
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -208,6 +209,9 @@ def construir_payload(tipo, inspeccion, event_id):
         'estado': inspeccion.estado,
         'pdf_estado': inspeccion.pdf_estado,
     }
+    manifiesto = _testigo_manifiesto(inspeccion.pk)
+    if manifiesto:
+        datos['manifiesto'] = manifiesto
     if tipo == EVENTO_PDF_LISTO:
         from inspecciones.pdf_publico import caducidad, url_pdf_firmada
 
@@ -215,11 +219,40 @@ def construir_payload(tipo, inspeccion, event_id):
         # Un reintento manual pasado ese plazo entrega un enlace ya caducado.
         datos['pdf_url'] = url_pdf_firmada(inspeccion.pk)
         datos['pdf_url_caduca'] = (timezone.now() + caducidad()).isoformat()
+        # Qué manifiesto describe el PDF (puede quedar atrás si se reabre la inspección)
+        datos['pdf_manifiesto_raiz'] = inspeccion.pdf_manifiesto_raiz
     return {
         'event_id': str(event_id),
         'tipo': tipo,
         'fecha': timezone.now().isoformat(),
         'data': datos,
+    }
+
+
+def _testigo_manifiesto(inspeccion_id):
+    """Raíz Merkle y sello, leídos de la base de datos: el manifiesto se congela y se
+    sella con UPDATE, así que la instancia en memoria puede no tenerlos (#27)."""
+    from inspecciones.models import Inspeccion
+
+    fila = Inspeccion.objects.filter(pk=inspeccion_id).values(
+        'manifiesto', 'manifiesto_raiz', 'manifiesto_tsa_token', 'manifiesto_tsa_timestamp',
+        'manifiesto_tsa_url', 'manifiesto_tsa_cualificada', 'manifiesto_tsa_verificado',
+    ).first()
+    if not fila or not fila['manifiesto_raiz']:
+        return None
+    manifiesto = fila['manifiesto'] if isinstance(fila['manifiesto'], dict) else {}
+    hojas = manifiesto.get('hojas')
+    sellado = fila['manifiesto_tsa_timestamp']
+    token = fila['manifiesto_tsa_token']
+    return {
+        'raiz': fila['manifiesto_raiz'],
+        'hojas': len(hojas) if isinstance(hojas, list) else None,
+        # El token RFC 3161 deja al PMS verificar el sello sin fiarse de CheckIt (openssl ts -verify)
+        'tsa_token': base64.b64encode(bytes(token)).decode('ascii') if token else None,
+        'tsa_timestamp': sellado.isoformat() if sellado else None,
+        'tsa_url': fila['manifiesto_tsa_url'] or None,
+        'tsa_cualificada': fila['manifiesto_tsa_cualificada'],
+        'tsa_verificado': fila['manifiesto_tsa_verificado'],
     }
 
 

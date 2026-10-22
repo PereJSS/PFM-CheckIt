@@ -367,22 +367,29 @@ Procesamiento (`integraciones/tasks.py`): `reservation.checkout` crea una inspec
 Cada admin puede registrar destinos (`/integraciones/destinos/`, o desde la pestaña **Integraciones** del panel) para que CheckIt avise a su PMS:
 
 - `inspeccion.completada`: la inspección pasa a `COMPLETADA`.
-- `pdf.listo`: el PDF firmado pasa a `LISTO`.
+- `pdf.listo`: el PDF firmado pasa a `LISTO`. Lleva `pdf_url` (enlace firmado con caducidad, `pdf_url_caduca`) y `pdf_manifiesto_raiz`, la raíz que describe ese PDF.
+- `manifiesto.sellado`: la TSA sella la raíz del manifiesto Merkle (al completar, o más tarde en el re-sellado periódico si la TSA estaba caída).
 
-Los eventos se emiten solo en la transición (señales sobre `Inspeccion`) y se encolan tras el commit. Payload:
+Los eventos se emiten solo en la transición (señales sobre `Inspeccion`, y señales propias `pdf_listo`/`manifiesto_sellado` para lo que se guarda con UPDATE condicional) y se encolan tras el commit. Los destinos nuevos se suscriben a todos los eventos; los ya creados conservan su lista y hay que añadirles `manifiesto.sellado` a mano. Payload:
 
 ```json
-{"event_id": "…", "tipo": "pdf.listo", "fecha": "…",
- "data": {"inspeccion_id": 1, "propiedad_id": 2, "external_id": "LISTING-42", "estado": "COMPLETADA", "pdf_estado": "LISTO"}}
+{"event_id": "…", "tipo": "manifiesto.sellado", "fecha": "…",
+ "data": {"inspeccion_id": 1, "propiedad_id": 2, "external_id": "LISTING-42", "estado": "COMPLETADA", "pdf_estado": "PENDIENTE",
+          "manifiesto": {"raiz": "9f86…", "hojas": 12, "tsa_token": "MIIE…", "tsa_timestamp": "2026-10-22T09:15:03+00:00",
+                         "tsa_url": "https://freetsa.org/tsr", "tsa_cualificada": false, "tsa_verificado": true}}}
 ```
+
+**Testigo externo de la raíz.** El bloque `manifiesto` va en todos los eventos desde que la inspección se completa (`tsa_*` en `null` hasta que se sella). Así el PMS guarda una copia de la raíz fuera del control de CheckIt. Para que sirva de testigo, el receptor debe:
+
+- **Conservar la primera raíz** de cada `inspeccion_id` y alertar si después llega otra distinta. Una reapertura legítima también cambia la raíz, así que una raíz nueva no prueba manipulación, pero sí obliga a CheckIt a explicarla (las anteriores quedan en `manifiestos_anteriores`).
+- **Verificar el sello por su cuenta** con `tsa_token` (token RFC 3161 en base64) y el certificado de la TSA: `openssl ts -verify -digest <raiz> -in token.tst -CAfile tsa.pem`. `tsa_timestamp`, `tsa_cualificada` y `tsa_verificado` son lo que declara CheckIt, solo informativos.
+- Tener en cuenta que la entrega es *at-least-once* pero no garantizada: un destino caído o desactivado, o una entrega `FALLIDA`, deja huecos que el PMS no ve. Las entregas se purgan pasado un tiempo.
 
 Cabeceras: `X-CheckIt-Signature: sha256=<hex>` (HMAC-SHA256 del cuerpo crudo con el secreto `whsec_…`), `X-CheckIt-Event` y `X-CheckIt-Delivery` (estable entre reintentos). El receptor debe verificar la firma con comparación en tiempo constante, rechazar `fecha` antiguas y **deduplicar por `X-CheckIt-Delivery`**: la entrega es *at-least-once*.
 
 - **Reintentos**: ante 5xx o error de red, backoff exponencial (`30·2^n` s, hasta 5). Un 4xx o 3xx deja la entrega `FALLIDA` sin reintentar; no se siguen redirecciones.
 - **Recuperación**: Celery beat ejecuta cada 5 min `reencolar_entregas_atascadas` (entregas `PENDIENTE` sin actividad >10 min, p. ej. con el broker caído). También se pueden reintentar a mano.
 - **Protección SSRF**: solo `https`; se rechazan userinfo, `\`, URLs ambiguas y hosts que resuelvan a IPs privadas, loopback, link-local, metadatos de nube o rangos de transición IPv6. La IP se valida en el momento de conectar y la conexión se fija a esa IP (con SNI y certificado del hostname original), sin proxies del entorno. Depende de `requests==2.32.4` y `urllib3==2.2.3`: revisar `integraciones/salientes.py` antes de actualizarlas.
-- **Pendiente**: la URL del PDF en `pdf.listo` (requiere un endpoint de descarga firmado) y la purga de entregas antiguas.
-
 ---
 
 ## Documentación de la API (OpenAPI) y límites de peticiones

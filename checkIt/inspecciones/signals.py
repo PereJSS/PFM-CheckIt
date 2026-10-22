@@ -5,16 +5,43 @@ pre_save recuerda el estado anterior y post_save compara:
 - al pasar a COMPLETADA se congela el manifiesto en la misma transacción y el
   sellado (con red) se encola tras el commit;
 - al salir de COMPLETADA (reapertura) se archiva el manifiesto sellado.
+
+Las transiciones que se guardan con un UPDATE condicional (PDF listo, manifiesto
+sellado) no disparan post_save: se anuncian con señales propias tras el commit.
 """
 import logging
 
 from django.db import transaction
 from django.db.models.signals import post_save, pre_save
-from django.dispatch import receiver
+from django.dispatch import Signal, receiver
 
 from .models import Inspeccion
 
 logger = logging.getLogger(__name__)
+
+# Argumentos: inspeccion (recargada de la base de datos tras el commit) y, en
+# manifiesto_sellado, raiz (la que se selló: puede no ser ya la vigente)
+pdf_listo = Signal()
+manifiesto_sellado = Signal()
+
+
+def enviar_al_confirmar(senal, inspeccion_id, **datos):
+    """Envía la señal tras el commit sin propagar errores: quien llama ya guardó
+    el cambio (PDF listo, sello) y un fallo al avisar no debe deshacerlo ni reintentarlo."""
+    def enviar():
+        try:
+            inspeccion = Inspeccion.objects.select_related('propiedad').filter(pk=inspeccion_id).first()
+            if inspeccion is None:
+                logger.info('Inspección %s borrada antes de anunciar su cambio: no se avisa', inspeccion_id)
+                return
+            for receptor, resultado in senal.send_robust(sender=Inspeccion, inspeccion=inspeccion, **datos):
+                if isinstance(resultado, Exception):
+                    logger.error('El receptor %r falló con la inspección %s', receptor, inspeccion_id,
+                                 exc_info=resultado)
+        except Exception:
+            logger.exception('No se pudo anunciar el cambio de la inspección %s', inspeccion_id)
+
+    transaction.on_commit(enviar)
 
 
 @receiver(pre_save, sender=Inspeccion, dispatch_uid='inspecciones_manifiesto_pre_save')

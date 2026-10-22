@@ -27,6 +27,7 @@ import {
 const EVENTOS_SALIENTES = [
   { valor: "inspeccion.completada", label: "Inspección completada" },
   { valor: "pdf.listo", label: "PDF listo" },
+  { valor: "manifiesto.sellado", label: "Manifiesto sellado" },
 ];
 
 const DESTINO_EMPTY = {

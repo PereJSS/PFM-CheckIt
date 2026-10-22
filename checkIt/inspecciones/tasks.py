@@ -40,7 +40,10 @@ def generar_pdf_async(self, inspeccion_id):
         guardado = Inspeccion.objects.filter(pk=inspeccion.pk, manifiesto_raiz=raiz).update(
             pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_ruta=pdf_ruta, pdf_manifiesto_raiz=raiz,
         )
-        if not guardado:
+        if guardado:
+            from .signals import enviar_al_confirmar, pdf_listo
+            enviar_al_confirmar(pdf_listo, inspeccion.pk)
+        else:
             logger.warning('La inspección %s cambió mientras se generaba su PDF: se descarta', inspeccion.pk)
             Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.GENERANDO).update(
                 pdf_estado=Inspeccion.PdfEstado.PENDIENTE,

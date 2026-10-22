@@ -101,7 +101,9 @@ class WebhookEvent(models.Model):
 
 EVENTO_INSPECCION_COMPLETADA = 'inspeccion.completada'
 EVENTO_PDF_LISTO = 'pdf.listo'
-EVENTOS_SALIENTES = (EVENTO_INSPECCION_COMPLETADA, EVENTO_PDF_LISTO)
+# Copia de la raíz sellada fuera de CheckIt: si se rehace o se borra la inspección, se nota
+EVENTO_MANIFIESTO_SELLADO = 'manifiesto.sellado'
+EVENTOS_SALIENTES = (EVENTO_INSPECCION_COMPLETADA, EVENTO_PDF_LISTO, EVENTO_MANIFIESTO_SELLADO)
 SECRETO_PREFIX = 'whsec'
 
 

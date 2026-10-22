@@ -784,6 +784,38 @@ class SenalesSalientesTest(BaseSalientesTest):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(b''.join(resp.streaming_content), b'%PDF-1.7 x')
 
+    def _generar_pdf(self, firmar=None):
+        from inspecciones.tasks import generar_pdf_async
+
+        def firmar_por_defecto(entrada, salida):
+            open(salida, 'wb').write(b'%PDF-1.7 x')
+
+        with patch('inspecciones.services.pdf_generator.generar_informe_base',
+                   side_effect=lambda insp, ruta: open(ruta, 'wb').close() or ruta), \
+                patch('inspecciones.services.pdf_signer.firmar_pdf_reclamacion',
+                      side_effect=firmar or firmar_por_defecto), \
+                self.captureOnCommitCallbacks(execute=True):
+            generar_pdf_async.apply(args=[self.inspeccion.pk])
+
+    def test_la_tarea_del_pdf_emite_pdf_listo(self, mock_encolar):
+        # Regresión: la tarea marca LISTO con un UPDATE condicional, que no dispara post_save
+        self._generar_pdf()
+        self.inspeccion.refresh_from_db()
+        self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.LISTO)
+        entrega = EntregaWebhook.objects.get()
+        self.assertEqual(entrega.evento, 'pdf.listo')
+        self.assertEqual(entrega.payload['data']['pdf_estado'], Inspeccion.PdfEstado.LISTO)
+        self.assertIn('pdf_url', entrega.payload['data'])
+        mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
+
+    def test_pdf_descartado_no_emite_pdf_listo(self, mock_encolar):
+        def firmar_y_cambiar_raiz(entrada, salida):
+            Inspeccion.objects.filter(pk=self.inspeccion.pk).update(manifiesto_raiz='ef' * 32)
+            open(salida, 'wb').write(b'%PDF-1.7 x')
+
+        self._generar_pdf(firmar_y_cambiar_raiz)
+        self.assertFalse(EntregaWebhook.objects.filter(evento='pdf.listo').exists())
+
     def test_inspeccion_completada_sin_pdf_url(self, mock_encolar):
         self._completar()
         self.assertNotIn('pdf_url', EntregaWebhook.objects.get().payload['data'])
@@ -869,7 +901,7 @@ class WebhookDestinoApiTest(BaseIntegracionTest):
         resp = self.client.post(DESTINOS_URL, {'url': 'https://pms.example.com/hook'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(resp.data['secreto'].startswith('whsec_'))
-        self.assertEqual(resp.data['eventos'], ['inspeccion.completada', 'pdf.listo'])
+        self.assertEqual(resp.data['eventos'], ['inspeccion.completada', 'pdf.listo', 'manifiesto.sellado'])
         destino = WebhookDestino.objects.get()
         self.assertEqual(destino.owner, self.admin)
         self.assertEqual(destino.secreto, resp.data['secreto'])
@@ -1073,3 +1105,110 @@ class PurgaEntregasTest(BaseSalientesTest):
         self.assertIn('integraciones.tasks.purgar_entregas_webhook', tareas)
         self._entrega(200, EntregaWebhook.Estado.ENTREGADA)
         self.assertEqual(purgar_entregas_webhook.apply().get(), 1)
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class TestigoRaizTest(BaseSalientesTest):
+    """#27: la raíz del manifiesto (y su sello) sale hacia el PMS, fuera del control de CheckIt."""
+
+    SELLO = {
+        'token': b'tst', 'url': 'https://tsa.example/tsr', 'cualificada': False, 'verificado': True,
+    }
+
+    def _sellar(self):
+        from inspecciones.services.manifiesto import sellar_manifiesto
+        datos = {**self.SELLO, 'timestamp': timezone.now()}
+        with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=datos), \
+                self.captureOnCommitCallbacks(execute=True):
+            return sellar_manifiesto(self.inspeccion.pk)
+
+    def test_completada_lleva_la_raiz_congelada_sin_sello(self, mock_encolar):
+        self._completar()
+        self.inspeccion.refresh_from_db()
+        manifiesto = EntregaWebhook.objects.get().payload['data']['manifiesto']
+        self.assertEqual(manifiesto['raiz'], self.inspeccion.manifiesto_raiz)
+        self.assertEqual(manifiesto['hojas'], 0)
+        self.assertIsNone(manifiesto['tsa_timestamp'])
+
+    def test_sellar_emite_manifiesto_sellado_una_vez(self, mock_encolar):
+        self._completar()
+        self.assertTrue(self._sellar())
+        self.assertTrue(self._sellar())  # ya sellado: no reemite
+        entrega = EntregaWebhook.objects.get(evento='manifiesto.sellado')
+        self.inspeccion.refresh_from_db()
+        manifiesto = entrega.payload['data']['manifiesto']
+        self.assertEqual(manifiesto['raiz'], self.inspeccion.manifiesto_raiz)
+        self.assertEqual(manifiesto['tsa_timestamp'], self.inspeccion.manifiesto_tsa_timestamp.isoformat())
+        self.assertEqual(manifiesto['tsa_url'], 'https://tsa.example/tsr')
+        self.assertFalse(manifiesto['tsa_cualificada'])
+        self.assertTrue(manifiesto['tsa_verificado'])
+
+    def test_tsa_caida_no_emite(self, mock_encolar):
+        from inspecciones.services.manifiesto import sellar_manifiesto
+        self._completar()
+        with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=None), \
+                self.captureOnCommitCallbacks(execute=True):
+            self.assertFalse(sellar_manifiesto(self.inspeccion.pk))
+        self.assertFalse(EntregaWebhook.objects.filter(evento='manifiesto.sellado').exists())
+
+    def test_respeta_la_suscripcion(self, mock_encolar):
+        self.destino.eventos = ['pdf.listo']
+        self.destino.save()
+        self._completar()
+        self._sellar()
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+
+    def test_sin_raiz_no_hay_bloque_manifiesto(self, mock_encolar):
+        from .salientes import construir_payload
+        datos = construir_payload('pdf.listo', self.inspeccion, uuid4())['data']
+        self.assertNotIn('manifiesto', datos)
+
+    def test_pdf_listo_dice_que_raiz_describe_el_pdf(self, mock_encolar):
+        self._completar()
+        self._sellar()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            pdf_estado=Inspeccion.PdfEstado.GENERANDO, pdf_ruta=default_storage.save('informes/y.pdf', ContentFile(b'%PDF')),
+        )
+        self.inspeccion.refresh_from_db()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_manifiesto_raiz=self.inspeccion.manifiesto_raiz,
+        )
+        from inspecciones.signals import enviar_al_confirmar, pdf_listo
+        with self.captureOnCommitCallbacks(execute=True):
+            enviar_al_confirmar(pdf_listo, self.inspeccion.pk)
+        datos = EntregaWebhook.objects.get(evento='pdf.listo').payload['data']
+        self.assertEqual(datos['pdf_manifiesto_raiz'], self.inspeccion.manifiesto_raiz)
+        self.assertEqual(datos['manifiesto']['raiz'], self.inspeccion.manifiesto_raiz)
+
+    def test_destino_nuevo_se_suscribe_al_evento(self, mock_encolar):
+        self.assertIn('manifiesto.sellado', WebhookDestino.objects.create(
+            owner=self.admin, url='https://pms.example.com/otro').eventos)
+
+    def test_sellado_lleva_el_token_para_verificarlo_fuera(self, mock_encolar):
+        import base64
+        self._completar()
+        self._sellar()
+        manifiesto = EntregaWebhook.objects.get(evento='manifiesto.sellado').payload['data']['manifiesto']
+        self.assertEqual(base64.b64decode(manifiesto['tsa_token']), b'tst')
+
+    def test_reabierta_tras_sellar_no_emite(self, mock_encolar):
+        from inspecciones.signals import enviar_al_confirmar, manifiesto_sellado
+        self._completar()
+        with self.captureOnCommitCallbacks(execute=True):
+            enviar_al_confirmar(manifiesto_sellado, self.inspeccion.pk, raiz='ab' * 32)
+        self.assertFalse(EntregaWebhook.objects.filter(evento='manifiesto.sellado').exists())
+
+    def test_manifiesto_corrupto_no_tumba_el_webhook(self, mock_encolar):
+        self._completar()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(manifiesto=['no', 'dict'])
+        from .salientes import construir_payload
+        manifiesto = construir_payload('pdf.listo', self.inspeccion, uuid4())['data']['manifiesto']
+        self.assertIsNone(manifiesto['hojas'])
+        self.assertTrue(manifiesto['raiz'])
+
+    def test_fallo_al_avisar_no_marca_el_pdf_como_error(self, mock_encolar):
+        # Si avisar falla, el PDF ya guardado como LISTO no debe pasar a ERROR ni regenerarse
+        with patch('inspecciones.signals.Inspeccion.objects.select_related', side_effect=RuntimeError('bd caída')):
+            SenalesSalientesTest._generar_pdf(self)
+        self.inspeccion.refresh_from_db()
+        self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.LISTO)
