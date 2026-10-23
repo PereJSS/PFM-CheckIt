@@ -447,10 +447,12 @@ from django.test import override_settings  # noqa: E402
 from django.utils import timezone  # noqa: E402
 from urllib3.response import HTTPResponse  # noqa: E402
 
-from .models import EntregaWebhook, WebhookDestino  # noqa: E402
+from .models import EntregaWebhook, EventoSaliente, WebhookDestino  # noqa: E402
 from .salientes import (  # noqa: E402
+    MAX_INTENTOS_DESPACHO,
     UrlNoPermitida,
     _sesion,
+    despachar_evento,
     entregar,
     reencolar_atascadas,
     validar_esquema_url,
@@ -1212,3 +1214,138 @@ class TestigoRaizTest(BaseSalientesTest):
             SenalesSalientesTest._generar_pdf(self)
         self.inspeccion.refresh_from_db()
         self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.LISTO)
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class OutboxTest(BaseSalientesTest):
+    """El evento se registra en la transacción del cambio y se reparte al confirmar:
+    si el reparto falla o el proceso muere, queda PENDIENTE para el barrido."""
+
+    def _registrar_sin_despachar(self):
+        self.inspeccion.estado = Inspeccion.Estado.COMPLETADA
+        with self.captureOnCommitCallbacks(execute=False):
+            self.inspeccion.save()
+        return EventoSaliente.objects.get()
+
+    def test_completar_registra_el_evento_y_lo_despacha_al_confirmar(self, mock_encolar):
+        self._completar()
+        evento = EventoSaliente.objects.get()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.DESPACHADO)
+        self.assertEqual(evento.tipo, 'inspeccion.completada')
+        self.assertEqual(evento.owner, self.admin)
+        entrega = EntregaWebhook.objects.get()
+        self.assertEqual(entrega.evento_saliente, evento)
+        self.assertEqual(entrega.event_id, evento.event_id)
+        self.assertEqual(entrega.payload['event_id'], str(evento.event_id))
+        mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
+
+    def test_sin_despachar_el_evento_queda_pendiente(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+        self.assertIsNotNone(evento.datos)
+
+    def test_despachar_dos_veces_no_duplica_entregas(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_evento(evento.pk)
+            despachar_evento(evento.pk)
+        self.assertEqual(EntregaWebhook.objects.count(), 1)
+        self.assertEqual(mock_encolar.call_count, 1)
+
+    def test_una_sola_entrega_por_destino_y_evento(self, mock_encolar):
+        from django.db import IntegrityError, transaction
+        self._completar()
+        entrega = EntregaWebhook.objects.get()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            EntregaWebhook.objects.create(
+                destino=entrega.destino, evento=entrega.evento, event_id=entrega.event_id,
+                evento_saliente=entrega.evento_saliente,
+            )
+
+    def test_destino_creado_despues_del_evento_no_lo_recibe(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        EventoSaliente.objects.filter(pk=evento.pk).update(creado=timezone.now() - timedelta(minutes=5))
+        WebhookDestino.objects.filter(pk=self.destino.pk).update(creado=timezone.now() - timedelta(days=1))
+        WebhookDestino.objects.create(owner=self.admin, url='https://otro.example.com/hook')
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_evento(evento.pk)
+        self.assertEqual(list(EntregaWebhook.objects.values_list('destino', flat=True)), [self.destino.pk])
+
+    def test_fallo_al_despachar_deja_el_evento_pendiente_con_el_error(self, mock_encolar):
+        with patch('integraciones.salientes.construir_datos', side_effect=RuntimeError('boom')), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            self._completar()
+        self.inspeccion.refresh_from_db()
+        self.assertEqual(self.inspeccion.estado, Inspeccion.Estado.COMPLETADA)
+        evento = EventoSaliente.objects.get()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+        self.assertIsNone(evento.datos)
+        self.assertEqual(evento.intentos, 1)
+        self.assertIn('RuntimeError', evento.error)
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+        # Al reintentar, sin el fallo, se reconstruyen los datos y se entrega
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_evento(evento.pk)
+        self.assertEqual(EntregaWebhook.objects.get().payload['data']['inspeccion_id'], self.inspeccion.pk)
+
+    def test_tras_max_intentos_el_evento_se_descarta(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        EventoSaliente.objects.filter(pk=evento.pk).update(intentos=MAX_INTENTOS_DESPACHO - 1)
+        with patch('integraciones.salientes._destinos_suscritos', side_effect=RuntimeError('boom')), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            despachar_evento(evento.pk)
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.DESCARTADO)
+
+    def test_sin_destinos_suscritos_no_se_escribe_en_el_outbox(self, mock_encolar):
+        self.destino.eventos = ['pdf.listo']
+        self.destino.save()
+        self._completar()
+        self.assertEqual(EventoSaliente.objects.count(), 0)
+
+    def test_inspeccion_borrada_antes_de_despachar_se_descarta(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        self.inspeccion.delete()
+        despachar_evento(evento.pk)
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.DESCARTADO)
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+
+    def test_fecha_es_la_del_despacho_y_ocurrido_la_del_evento(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        hace_una_hora = timezone.now() - timedelta(hours=1)
+        EventoSaliente.objects.filter(pk=evento.pk).update(creado=hace_una_hora)
+        WebhookDestino.objects.filter(pk=self.destino.pk).update(creado=timezone.now() - timedelta(days=1))
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_evento(evento.pk)
+        payload = EntregaWebhook.objects.get().payload
+        from datetime import datetime
+        self.assertEqual(datetime.fromisoformat(payload['ocurrido']), hace_una_hora)
+        self.assertGreater(datetime.fromisoformat(payload['fecha']), hace_una_hora + timedelta(minutes=59))
+
+    def test_el_enlace_del_pdf_se_firma_al_despachar(self, mock_encolar):
+        self.destino.eventos = ['pdf.listo']
+        self.destino.save()
+        from .salientes import emitir_evento
+        with self.captureOnCommitCallbacks(execute=False):
+            emitir_evento('pdf.listo', self.inspeccion)
+        evento = EventoSaliente.objects.get()
+        self.assertNotIn('pdf_url', evento.datos)
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_evento(evento.pk)
+        self.assertIn('/api/v1/informes/', EntregaWebhook.objects.get().payload['data']['pdf_url'])
+
+    def test_si_no_se_puede_anotar_el_fallo_despachar_no_lanza(self, mock_encolar):
+        evento = self._registrar_sin_despachar()
+        with patch('integraciones.salientes._destinos_suscritos', side_effect=RuntimeError('boom')), \
+                patch('integraciones.salientes._fallo_despacho', side_effect=RuntimeError('bd caída')), \
+                self.assertLogs('integraciones.salientes', level='ERROR') as logs:
+            self.assertEqual(despachar_evento(evento.pk), [])
+        self.assertTrue(any('anotar el fallo' in m for m in logs.output))
+
+    def test_datos_no_serializables_se_guardan_como_null(self, mock_encolar):
+        with patch('integraciones.salientes.construir_datos', return_value={'x': object()}), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            evento = self._registrar_sin_despachar()
+        self.assertIsNone(evento.datos)

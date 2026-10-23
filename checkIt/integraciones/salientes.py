@@ -25,7 +25,7 @@ from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util import parse_url
 
-from .models import EVENTO_PDF_LISTO, EntregaWebhook, WebhookDestino
+from .models import EVENTO_PDF_LISTO, EntregaWebhook, EventoSaliente, WebhookDestino
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ TIMEOUT_LECTURA = config('WEBHOOK_SALIENTE_TIMEOUT', default=5, cast=float)
 MAX_REINTENTOS = config('WEBHOOK_SALIENTE_MAX_REINTENTOS', default=5, cast=int)
 BACKOFF_BASE = config('WEBHOOK_SALIENTE_BACKOFF_BASE', default=30, cast=int)
 MAX_DESTINOS = config('WEBHOOK_SALIENTE_MAX_DESTINOS', default=10, cast=int)
+# Fallos al repartir un evento del outbox tras los que se descarta
+MAX_INTENTOS_DESPACHO = config('WEBHOOK_SALIENTE_MAX_INTENTOS_DESPACHO', default=5, cast=int)
 # Días que se conservan las entregas cerradas antes de la purga periódica
 RETENCION_DIAS = config('WEBHOOK_ENTREGAS_RETENCION_DIAS', default=90, cast=int)
 # Solo para desarrollo: permite http y destinos locales/privados
@@ -200,7 +202,8 @@ def firmar(cuerpo, secreto):
     return 'sha256=' + hmac.new(secreto.encode('utf-8'), cuerpo, hashlib.sha256).hexdigest()
 
 
-def construir_payload(tipo, inspeccion, event_id):
+def construir_datos(tipo, inspeccion):
+    """Bloque `data` del evento, sin el enlace del PDF (se firma al despachar)."""
     propiedad = inspeccion.propiedad
     datos = {
         'inspeccion_id': inspeccion.pk,
@@ -213,20 +216,39 @@ def construir_payload(tipo, inspeccion, event_id):
     if manifiesto:
         datos['manifiesto'] = manifiesto
     if tipo == EVENTO_PDF_LISTO:
-        from inspecciones.pdf_publico import caducidad, url_pdf_firmada
-
-        # Enlace firmado y con caducidad: el PMS no tiene JWT para claim-report.
-        # Un reintento manual pasado ese plazo entrega un enlace ya caducado.
-        datos['pdf_url'] = url_pdf_firmada(inspeccion.pk)
-        datos['pdf_url_caduca'] = (timezone.now() + caducidad()).isoformat()
         # Qué manifiesto describe el PDF (puede quedar atrás si se reabre la inspección)
         datos['pdf_manifiesto_raiz'] = inspeccion.pdf_manifiesto_raiz
+    return datos
+
+
+def _con_enlace_pdf(tipo, inspeccion_id, datos):
+    if tipo != EVENTO_PDF_LISTO:
+        return datos
+    from inspecciones.pdf_publico import caducidad, url_pdf_firmada
+
+    # Enlace firmado y con caducidad: el PMS no tiene JWT para claim-report.
+    # Un reintento manual pasado ese plazo entrega un enlace ya caducado.
+    return {
+        **datos,
+        'pdf_url': url_pdf_firmada(inspeccion_id),
+        'pdf_url_caduca': (timezone.now() + caducidad()).isoformat(),
+    }
+
+
+def _sobre(event_id, tipo, datos, ocurrido):
+    # `fecha` es la del envío (el receptor rechaza las antiguas); `ocurrido`, la del cambio
     return {
         'event_id': str(event_id),
         'tipo': tipo,
         'fecha': timezone.now().isoformat(),
+        'ocurrido': ocurrido.isoformat(),
         'data': datos,
     }
+
+
+def construir_payload(tipo, inspeccion, event_id):
+    datos = _con_enlace_pdf(tipo, inspeccion.pk, construir_datos(tipo, inspeccion))
+    return _sobre(event_id, tipo, datos, timezone.now())
 
 
 def _testigo_manifiesto(inspeccion_id):
@@ -271,30 +293,101 @@ def encolar_entrega(entrega_id):
         )
 
 
-def emitir_evento(tipo, inspeccion):
+def _destinos_suscritos(owner_id, tipo, hasta=None):
+    destinos = WebhookDestino.objects.filter(owner_id=owner_id, activo=True)
+    if hasta is not None:
+        # Un destino creado después del evento no lo recibe (p. ej. al despachar tarde)
+        destinos = destinos.filter(creado__lte=hasta)
+    # En orden de pk: dos despachos simultáneos bloquean los destinos en el mismo orden
+    return [d for d in destinos.order_by('pk') if tipo in (d.eventos or [])]
+
+
+def registrar_evento(tipo, inspeccion):
     """
-    Crea una EntregaWebhook por cada destino activo del owner suscrito a `tipo`
-    y la encola al confirmar la transacción. Devuelve las entregas creadas.
+    Guarda el evento en el outbox, en la transacción del cambio que lo origina, y lo
+    reparte al confirmar. Sin destinos suscritos no escribe nada. Devuelve el evento.
     """
     owner_id = inspeccion.propiedad.owner_id
-    destinos = [
-        d for d in WebhookDestino.objects.filter(owner_id=owner_id, activo=True)
-        if tipo in (d.eventos or [])
-    ]
-    if not destinos:
+    if not _destinos_suscritos(owner_id, tipo):
+        return None
+    try:
+        # Savepoint: un error de BD aquí no debe romper la transacción del cambio
+        with transaction.atomic():
+            datos = construir_datos(tipo, inspeccion)
+            json.dumps(datos)  # lo que el JSONField no pueda guardar, aquí y no en el INSERT
+    except Exception:
+        # Se guarda igual: al despachar se reconstruyen los datos
+        logger.exception("No se pudieron construir los datos del evento %s de la inspección %s", tipo, inspeccion.pk)
+        datos = None
+    evento = EventoSaliente.objects.create(owner_id=owner_id, tipo=tipo, inspeccion=inspeccion, datos=datos)
+    # robust: un fallo de este aviso no corta los demás callbacks ni llega a quien confirmó
+    transaction.on_commit(lambda pk=evento.pk: despachar_evento(pk), robust=True)
+    return evento
+
+
+def emitir_evento(tipo, inspeccion):
+    return registrar_evento(tipo, inspeccion)
+
+
+def despachar_evento(evento_id):
+    """
+    Reparte un evento PENDIENTE del outbox: una EntregaWebhook por destino, encoladas
+    al confirmar. Idempotente (bloqueo de la fila y entrega única por destino) y sin
+    llamadas de red. Nunca lanza: un fallo suma un intento y deja el evento PENDIENTE.
+    """
+    try:
+        with transaction.atomic():
+            evento = EventoSaliente.objects.select_for_update().filter(
+                pk=evento_id, estado=EventoSaliente.Estado.PENDIENTE,
+            ).first()
+            if evento is None:
+                return []
+            if evento.inspeccion_id is None:
+                logger.warning("Evento saliente %s descartado: su inspección se borró antes de despachar", evento.pk)
+                _cerrar_evento(evento.pk, EventoSaliente.Estado.DESCARTADO, 'Inspección borrada antes de despachar.')
+                return []
+            datos = evento.datos
+            if datos is None:
+                from inspecciones.models import Inspeccion
+
+                inspeccion = Inspeccion.objects.select_related('propiedad').get(pk=evento.inspeccion_id)
+                datos = construir_datos(evento.tipo, inspeccion)
+            datos = _con_enlace_pdf(evento.tipo, evento.inspeccion_id, datos)
+            entregas = [
+                EntregaWebhook.objects.create(
+                    destino=d, evento=evento.tipo, event_id=evento.event_id, evento_saliente=evento,
+                    inspeccion_id=evento.inspeccion_id, payload=_sobre(evento.event_id, evento.tipo, datos, evento.creado),
+                )
+                for d in _destinos_suscritos(evento.owner_id, evento.tipo, hasta=evento.creado)
+            ]
+            _cerrar_evento(evento.pk, EventoSaliente.Estado.DESPACHADO)
+            for entrega in entregas:
+                # robust: un fallo al encolar no es un fallo del despacho (ya está DESPACHADO)
+                transaction.on_commit(lambda pk=entrega.pk: encolar_entrega(pk), robust=True)
+        return entregas
+    except Exception as exc:
+        logger.exception("No se pudo despachar el evento saliente %s", evento_id)
+        try:
+            _fallo_despacho(evento_id, exc)
+        except Exception:
+            # BD caída: el evento sigue PENDIENTE y lo recoge el barrido
+            logger.exception("No se pudo anotar el fallo del evento saliente %s", evento_id)
         return []
 
-    event_id = uuid.uuid4()
-    payload = construir_payload(tipo, inspeccion, event_id)
-    entregas = [
-        EntregaWebhook.objects.create(
-            destino=d, evento=tipo, event_id=event_id, inspeccion=inspeccion, payload=payload,
-        )
-        for d in destinos
-    ]
-    for entrega in entregas:
-        transaction.on_commit(lambda pk=entrega.pk: encolar_entrega(pk))
-    return entregas
+
+def _cerrar_evento(evento_id, estado, error=''):
+    campos = {'estado': estado, 'error': error}
+    if estado == EventoSaliente.Estado.DESPACHADO:
+        campos['despachado'] = timezone.now()
+    EventoSaliente.objects.filter(pk=evento_id, estado=EventoSaliente.Estado.PENDIENTE).update(**campos)
+
+
+def _fallo_despacho(evento_id, exc):
+    pendiente = EventoSaliente.objects.filter(pk=evento_id, estado=EventoSaliente.Estado.PENDIENTE)
+    # Solo la clase: el mensaje puede arrastrar valores de la fila (el detalle va al log)
+    pendiente.update(intentos=F('intentos') + 1, error=f'Error al despachar: {type(exc).__name__}')
+    if pendiente.filter(intentos__gte=MAX_INTENTOS_DESPACHO).update(estado=EventoSaliente.Estado.DESCARTADO):
+        logger.error("Evento saliente %s descartado tras %s intentos de despacho", evento_id, MAX_INTENTOS_DESPACHO)
 
 
 # --- Entrega ---

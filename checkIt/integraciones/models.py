@@ -4,6 +4,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 API_KEY_PREFIX = 'ck'
 
@@ -168,6 +169,10 @@ class EntregaWebhook(models.Model):
         blank=True,
         related_name='entregas_webhook',
     )
+    # Evento del outbox que originó la entrega (NULL en las anteriores al outbox)
+    evento_saliente = models.ForeignKey(
+        'EventoSaliente', on_delete=models.SET_NULL, null=True, blank=True, related_name='entregas',
+    )
     payload = models.JSONField(default=dict)
     estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
     intentos = models.PositiveIntegerField(default=0)
@@ -179,6 +184,50 @@ class EntregaWebhook(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=['destino', '-creada'])]
+        constraints = [
+            # Idempotencia del despacho: un evento del outbox se reparte una sola vez por destino
+            models.UniqueConstraint(fields=['destino', 'evento_saliente'], name='entrega_unica_por_destino_y_evento'),
+        ]
 
     def __str__(self):
         return f"{self.evento} -> {self.destino_id} ({self.estado}, {self.intentos} intentos)"
+
+
+class EventoSaliente(models.Model):
+    """
+    Outbox de webhooks salientes: el evento se guarda en la misma transacción que el
+    cambio que lo origina y se reparte entre los destinos al confirmar. Si el reparto
+    falla o el proceso muere antes, queda PENDIENTE y lo recoge el barrido periódico.
+    """
+    class Estado(models.TextChoices):
+        PENDIENTE = 'PENDIENTE', 'Pendiente'
+        DESPACHADO = 'DESPACHADO', 'Despachado'
+        DESCARTADO = 'DESCARTADO', 'Descartado'
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='eventos_salientes')
+    tipo = models.CharField(max_length=64)
+    event_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    inspeccion = models.ForeignKey(
+        'inspecciones.Inspeccion',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='eventos_salientes',
+    )
+    # Foto de `data` tomada en la transacción del cambio; NULL si falló (se rehace al despachar)
+    datos = models.JSONField(blank=True, null=True)
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
+    intentos = models.PositiveSmallIntegerField(default=0)
+    error = models.TextField(blank=True, default='')
+    creado = models.DateTimeField(default=timezone.now)
+    despachado = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=['creado'], condition=models.Q(estado='PENDIENTE'), name='evento_saliente_pendiente',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.tipo} ({self.estado}, {self.intentos} intentos)"
