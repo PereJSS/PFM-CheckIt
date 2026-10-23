@@ -232,6 +232,12 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         self.perform_update(serializer)
         return Response(serializer.data)
 
+    def perform_update(self, serializer):
+        # El UPDATE y lo que hacen sus señales (congelar el manifiesto, el outbox de
+        # webhooks) se confirman juntos: si el proceso muere entre ambos, no se pierde nada
+        with transaction.atomic():
+            super().perform_update(serializer)
+
     def update(self, request, *args, **kwargs):
         # Forzamos el camino de validación de permisos de partial_update.
         kwargs['partial'] = True

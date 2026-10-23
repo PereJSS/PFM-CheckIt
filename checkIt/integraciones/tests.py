@@ -5,7 +5,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from inspecciones.models import Inspeccion
 from propiedades.models import Propiedad
@@ -786,7 +786,7 @@ class SenalesSalientesTest(BaseSalientesTest):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(b''.join(resp.streaming_content), b'%PDF-1.7 x')
 
-    def _generar_pdf(self, firmar=None):
+    def _generar_pdf(self, firmar=None, ejecutar=True):
         from inspecciones.tasks import generar_pdf_async
 
         def firmar_por_defecto(entrada, salida):
@@ -796,7 +796,7 @@ class SenalesSalientesTest(BaseSalientesTest):
                    side_effect=lambda insp, ruta: open(ruta, 'wb').close() or ruta), \
                 patch('inspecciones.services.pdf_signer.firmar_pdf_reclamacion',
                       side_effect=firmar or firmar_por_defecto), \
-                self.captureOnCommitCallbacks(execute=True):
+                self.captureOnCommitCallbacks(execute=ejecutar):
             generar_pdf_async.apply(args=[self.inspeccion.pk])
 
     def test_la_tarea_del_pdf_emite_pdf_listo(self, mock_encolar):
@@ -809,6 +809,30 @@ class SenalesSalientesTest(BaseSalientesTest):
         self.assertEqual(entrega.payload['data']['pdf_estado'], Inspeccion.PdfEstado.LISTO)
         self.assertIn('pdf_url', entrega.payload['data'])
         mock_encolar.assert_called_once_with(args=[entrega.pk], retry=False)
+
+    def test_si_el_worker_muere_tras_guardar_el_pdf_el_evento_sigue_en_el_outbox(self, mock_encolar):
+        # Los callbacks on_commit no llegan a ejecutarse
+        self._generar_pdf(ejecutar=False)
+        self.inspeccion.refresh_from_db()
+        self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.LISTO)
+        evento = EventoSaliente.objects.get(tipo='pdf.listo')
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+
+    def test_si_falla_una_senal_al_completar_no_queda_completada_sin_evento(self, mock_encolar):
+        self.inspeccion.operario = self.operario
+        self.inspeccion.save()
+        self.client.force_authenticate(user=self.operario)
+        self.client.raise_request_exception = False
+        with patch('inspecciones.services.manifiesto.congelar_manifiesto', side_effect=RuntimeError('boom')), \
+                self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.patch(
+                f'/api/v1/inspecciones/{self.inspeccion.pk}/', {'estado': 'COMPLETADA'}, format='json'
+            )
+        self.assertEqual(resp.status_code, 500)
+        self.inspeccion.refresh_from_db()
+        # Todo o nada: el cliente puede reintentar sin dejar una COMPLETADA sin manifiesto
+        self.assertNotEqual(self.inspeccion.estado, Inspeccion.Estado.COMPLETADA)
+        self.assertFalse(EventoSaliente.objects.exists())
 
     def test_pdf_descartado_no_emite_pdf_listo(self, mock_encolar):
         def firmar_y_cambiar_raiz(entrada, salida):
@@ -1117,12 +1141,19 @@ class TestigoRaizTest(BaseSalientesTest):
         'token': b'tst', 'url': 'https://tsa.example/tsr', 'cualificada': False, 'verificado': True,
     }
 
-    def _sellar(self):
+    def _sellar(self, ejecutar=True):
         from inspecciones.services.manifiesto import sellar_manifiesto
         datos = {**self.SELLO, 'timestamp': timezone.now()}
         with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=datos), \
-                self.captureOnCommitCallbacks(execute=True):
+                self.captureOnCommitCallbacks(execute=ejecutar):
             return sellar_manifiesto(self.inspeccion.pk)
+
+    def test_si_el_worker_muere_tras_sellar_el_evento_sigue_en_el_outbox(self, mock_encolar):
+        self._completar()
+        self.assertTrue(self._sellar(ejecutar=False))
+        evento = EventoSaliente.objects.get(tipo='manifiesto.sellado')
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+        self.assertIsNotNone(evento.datos['manifiesto']['tsa_timestamp'])
 
     def test_completada_lleva_la_raiz_congelada_sin_sello(self, mock_encolar):
         self._completar()
@@ -1175,9 +1206,9 @@ class TestigoRaizTest(BaseSalientesTest):
         Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
             pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_manifiesto_raiz=self.inspeccion.manifiesto_raiz,
         )
-        from inspecciones.signals import enviar_al_confirmar, pdf_listo
+        from inspecciones.signals import anunciar, pdf_listo
         with self.captureOnCommitCallbacks(execute=True):
-            enviar_al_confirmar(pdf_listo, self.inspeccion.pk)
+            anunciar(pdf_listo, self.inspeccion.pk)
         datos = EntregaWebhook.objects.get(evento='pdf.listo').payload['data']
         self.assertEqual(datos['pdf_manifiesto_raiz'], self.inspeccion.manifiesto_raiz)
         self.assertEqual(datos['manifiesto']['raiz'], self.inspeccion.manifiesto_raiz)
@@ -1194,10 +1225,10 @@ class TestigoRaizTest(BaseSalientesTest):
         self.assertEqual(base64.b64decode(manifiesto['tsa_token']), b'tst')
 
     def test_reabierta_tras_sellar_no_emite(self, mock_encolar):
-        from inspecciones.signals import enviar_al_confirmar, manifiesto_sellado
+        from inspecciones.signals import anunciar, manifiesto_sellado
         self._completar()
         with self.captureOnCommitCallbacks(execute=True):
-            enviar_al_confirmar(manifiesto_sellado, self.inspeccion.pk, raiz='ab' * 32)
+            anunciar(manifiesto_sellado, self.inspeccion.pk, raiz='ab' * 32)
         self.assertFalse(EntregaWebhook.objects.filter(evento='manifiesto.sellado').exists())
 
     def test_manifiesto_corrupto_no_tumba_el_webhook(self, mock_encolar):
@@ -1349,3 +1380,30 @@ class OutboxTest(BaseSalientesTest):
                 self.assertLogs('integraciones.salientes', level='ERROR'):
             evento = self._registrar_sin_despachar()
         self.assertIsNone(evento.datos)
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class CompletarAtomicoTest(APITransactionTestCase):
+    """Sin la transacción de TestCase: el UPDATE de la inspección y el INSERT del
+    outbox deben ir juntos, o un proceso que muera entre ambos pierde el evento."""
+
+    def test_completar_via_api_es_atomico_con_el_outbox(self, mock_encolar):
+        from django.db import connection
+        admin = User.objects.create_user(username='admin_tx', password='x', role=User.Role.ADMIN)
+        operario = User.objects.create_user(username='op_tx', password='x', role=User.Role.OPERARIO)
+        prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
+        WebhookDestino.objects.create(owner=admin, url='https://pms.example.com/hook')
+        inspeccion = Inspeccion.objects.create(propiedad=prop, operario=operario)
+        anidado = []
+        original = EventoSaliente.objects.create
+
+        def crear(**campos):
+            # Con una transacción exterior, el atomic() de _emitir es un savepoint
+            anidado.append(bool(connection.savepoint_ids))
+            return original(**campos)
+        self.client.force_authenticate(user=operario)
+        with patch.object(EventoSaliente.objects, 'create', side_effect=crear), \
+                patch('inspecciones.signals._encolar'):
+            resp = self.client.patch(f'/api/v1/inspecciones/{inspeccion.pk}/', {'estado': 'COMPLETADA'}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(anidado, [True])

@@ -131,16 +131,20 @@ def sellar_manifiesto(inspeccion_id):
         logger.warning('Manifiesto de la inspección %s sin sellar (TSA no disponible)', inspeccion_id)
         return False
 
-    sellada = pendientes.filter(
-        estado=Inspeccion.Estado.COMPLETADA, manifiesto_raiz=raiz, manifiesto_tsa_token__isnull=True,
-    ).update(
-        manifiesto_tsa_token=datos['token'],
-        manifiesto_tsa_timestamp=datos.get('timestamp'),
-        manifiesto_tsa_url=datos.get('url') or '',
-        manifiesto_tsa_cualificada=bool(datos.get('cualificada')),
-        manifiesto_tsa_verificado=bool(datos.get('verificado')),
-    )
-    if sellada:
-        from ..signals import enviar_al_confirmar, manifiesto_sellado
-        enviar_al_confirmar(manifiesto_sellado, inspeccion_id, raiz=raiz)
+    from ..signals import anunciar, manifiesto_sellado
+
+    # El aviso va en la transacción del sello: si el worker muere tras el commit,
+    # el evento ya está en el outbox de webhooks
+    with transaction.atomic():
+        sellada = pendientes.filter(
+            estado=Inspeccion.Estado.COMPLETADA, manifiesto_raiz=raiz, manifiesto_tsa_token__isnull=True,
+        ).update(
+            manifiesto_tsa_token=datos['token'],
+            manifiesto_tsa_timestamp=datos.get('timestamp'),
+            manifiesto_tsa_url=datos.get('url') or '',
+            manifiesto_tsa_cualificada=bool(datos.get('cualificada')),
+            manifiesto_tsa_verificado=bool(datos.get('verificado')),
+        )
+        if sellada:
+            anunciar(manifiesto_sellado, inspeccion_id, raiz=raiz)
     return pendientes.filter(manifiesto_raiz=raiz, manifiesto_tsa_token__isnull=False).exists()

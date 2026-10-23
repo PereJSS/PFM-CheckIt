@@ -7,7 +7,8 @@ pre_save recuerda el estado anterior y post_save compara:
 - al salir de COMPLETADA (reapertura) se archiva el manifiesto sellado.
 
 Las transiciones que se guardan con un UPDATE condicional (PDF listo, manifiesto
-sellado) no disparan post_save: se anuncian con señales propias tras el commit.
+sellado) no disparan post_save: se anuncian con señales propias en la misma
+transacción, para que el outbox de webhooks se confirme con el cambio.
 """
 import logging
 
@@ -19,17 +20,19 @@ from .models import Inspeccion
 
 logger = logging.getLogger(__name__)
 
-# Argumentos: inspeccion (recargada de la base de datos tras el commit) y, en
+# Argumentos: inspeccion (recargada de la base de datos tras el UPDATE) y, en
 # manifiesto_sellado, raiz (la que se selló: puede no ser ya la vigente)
 pdf_listo = Signal()
 manifiesto_sellado = Signal()
 
 
-def enviar_al_confirmar(senal, inspeccion_id, **datos):
-    """Envía la señal tras el commit sin propagar errores: quien llama ya guardó
-    el cambio (PDF listo, sello) y un fallo al avisar no debe deshacerlo ni reintentarlo."""
-    def enviar():
-        try:
+def anunciar(senal, inspeccion_id, **datos):
+    """Envía la señal dentro de la transacción del cambio (PDF listo, sello), para que
+    lo que registren los receptores (el outbox de webhooks) se confirme con él. Sin
+    propagar errores: un fallo al avisar no debe deshacer el cambio ni reintentarlo."""
+    try:
+        # Savepoint: un receptor que rompa la transacción no arrastra el cambio
+        with transaction.atomic():
             inspeccion = Inspeccion.objects.select_related('propiedad').filter(pk=inspeccion_id).first()
             if inspeccion is None:
                 logger.info('Inspección %s borrada antes de anunciar su cambio: no se avisa', inspeccion_id)
@@ -38,10 +41,8 @@ def enviar_al_confirmar(senal, inspeccion_id, **datos):
                 if isinstance(resultado, Exception):
                     logger.error('El receptor %r falló con la inspección %s', receptor, inspeccion_id,
                                  exc_info=resultado)
-        except Exception:
-            logger.exception('No se pudo anunciar el cambio de la inspección %s', inspeccion_id)
-
-    transaction.on_commit(enviar)
+    except Exception:
+        logger.exception('No se pudo anunciar el cambio de la inspección %s', inspeccion_id)
 
 
 @receiver(pre_save, sender=Inspeccion, dispatch_uid='inspecciones_manifiesto_pre_save')

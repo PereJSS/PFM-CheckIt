@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, time_limit=300, soft_time_limit=270)
 def generar_pdf_async(self, inspeccion_id):
+    from django.db import transaction
     from django.utils import timezone
 
     from .models import Inspeccion
@@ -44,19 +45,26 @@ def generar_pdf_async(self, inspeccion_id):
             pdf_signer.firmar_pdf_reclamacion(input_pdf, ruta_firmada)
             pdf_ruta = guardar_pdf(inspeccion.pk, ruta_firmada)
 
-        # Solo si la raíz no cambió durante la generación (p. ej., por una reapertura)
+        # Solo si la raíz no cambió durante la generación (p. ej., por una reapertura) y
+        # sigue GENERANDO (otra ejecución no lo dejó ya LISTO). El aviso va en la misma
+        # transacción: si el worker muere tras el commit, el evento ya está en el outbox
+        from .signals import anunciar, pdf_listo
+
         raiz = inspeccion.manifiesto_raiz
-        guardado = Inspeccion.objects.filter(pk=inspeccion.pk, manifiesto_raiz=raiz).update(
-            pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_ruta=pdf_ruta, pdf_manifiesto_raiz=raiz,
-        )
-        if guardado:
-            from .signals import enviar_al_confirmar, pdf_listo
-            enviar_al_confirmar(pdf_listo, inspeccion.pk)
-        else:
-            logger.warning('La inspección %s cambió mientras se generaba su PDF: se descarta', inspeccion.pk)
-            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.GENERANDO).update(
-                pdf_estado=Inspeccion.PdfEstado.PENDIENTE,
-            )
+        with transaction.atomic():
+            guardado = Inspeccion.objects.filter(
+                pk=inspeccion.pk, manifiesto_raiz=raiz, pdf_estado=Inspeccion.PdfEstado.GENERANDO,
+            ).update(pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_ruta=pdf_ruta, pdf_manifiesto_raiz=raiz)
+            if guardado:
+                anunciar(pdf_listo, inspeccion.pk)
+        if not guardado:
+            if Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.LISTO).exists():
+                logger.info('Otra ejecución dejó listo el PDF de la inspección %s: se descarta este', inspeccion.pk)
+            else:
+                logger.warning('La inspección %s cambió mientras se generaba su PDF: se descarta', inspeccion.pk)
+                Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.GENERANDO).update(
+                    pdf_estado=Inspeccion.PdfEstado.PENDIENTE,
+                )
     except Exception as exc:
         # ERROR solo al agotar los reintentos: antes, claim_report encolaría otra tarea en
         # paralelo al reintento. Condicional para no pisar un LISTO de otra ejecución
