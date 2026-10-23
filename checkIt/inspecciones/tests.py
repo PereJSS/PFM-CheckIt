@@ -397,6 +397,62 @@ class ClaimReportTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         mock_task.delay.assert_called_once_with(self.insp.pk)
 
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_no_pisa_un_listo_de_un_worker_rapido(self, mock_task):
+        # El worker termina antes de que la vista vuelva de encolar
+        def worker_rapido(pk):
+            Inspeccion.objects.filter(pk=pk).update(pdf_estado=Inspeccion.PdfEstado.LISTO)
+            return MagicMock(id='t')
+        mock_task.delay.side_effect = worker_rapido
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.insp.refresh_from_db()
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.LISTO)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_no_encola_si_otra_peticion_ya_reservo(self, mock_task):
+        mock_task.delay.return_value = MagicMock(id='t')
+        self.insp.pdf_estado = Inspeccion.PdfEstado.LISTO
+        self.insp.pdf_ruta = '/tmp/no-existe/Reclamacion_Fianza_1_Firmada.pdf'
+        self.insp.save()
+
+        # Otra petición pasa a GENERANDO entre la lectura y la reserva
+        def otra_peticion_gana(inspeccion):
+            Inspeccion.objects.filter(pk=inspeccion.pk).update(pdf_estado=Inspeccion.PdfEstado.GENERANDO)
+            return None
+        self.client.force_authenticate(user=self.admin)
+        with patch('inspecciones.services.almacen.abrir_pdf', side_effect=otra_peticion_gana):
+            response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn('task_id', response.data)
+        self.assertEqual(response.data['estado'], Inspeccion.PdfEstado.GENERANDO)
+        mock_task.delay.assert_not_called()
+        self.insp.refresh_from_db()
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.GENERANDO)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_sin_broker_devuelve_503_y_no_queda_generando(self, mock_task):
+        mock_task.delay.side_effect = ConnectionError('broker caído')
+        self.client.force_authenticate(user=self.admin)
+        with self.assertLogs('inspecciones.views', level='WARNING'):
+            response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.insp.refresh_from_db()
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_sin_broker_vuelve_a_error(self, mock_task):
+        mock_task.delay.side_effect = ConnectionError('broker caído')
+        self.insp.pdf_estado = Inspeccion.PdfEstado.ERROR
+        self.insp.save()
+        self.client.force_authenticate(user=self.admin)
+        with self.assertLogs('inspecciones.views', level='WARNING'):
+            response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.insp.refresh_from_db()
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.ERROR)
+
     def test_claim_report_returns_202_when_generando(self):
         self.insp.pdf_estado = Inspeccion.PdfEstado.GENERANDO
         self.insp.save()

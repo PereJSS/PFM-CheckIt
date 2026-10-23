@@ -271,18 +271,36 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                     filename=f"Reclamacion_CheckIt_{inspeccion.pk}.pdf",
                 )
 
-        if inspeccion.pdf_estado == Inspeccion.PdfEstado.GENERANDO:
+        generando = Inspeccion.PdfEstado.GENERANDO
+        # Reserva condicional antes de encolar: si se guardara después, un worker rápido
+        # vería su LISTO pisado; y de dos peticiones a la vez solo encola una
+        anterior = inspeccion.pdf_estado
+        reservada = anterior != generando and Inspeccion.objects.filter(
+            pk=inspeccion.pk, pdf_estado=anterior,
+        ).update(pdf_estado=generando)
+        if not reservada:
+            # Releído: si otra petición ganó la reserva, el estado puede ser ya otro
+            actual = Inspeccion.objects.filter(pk=inspeccion.pk).values_list('pdf_estado', flat=True).first()
             return Response(
-                {"estado": inspeccion.pdf_estado, "mensaje": "El PDF ya está siendo generado."},
+                {"estado": actual or generando, "mensaje": "El PDF ya está siendo generado."},
                 status=status.HTTP_202_ACCEPTED,
             )
 
         from .tasks import generar_pdf_async
-        task = generar_pdf_async.delay(inspeccion.pk)
-        inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
-        inspeccion.save(update_fields=['pdf_estado'])
+        try:
+            task = generar_pdf_async.delay(inspeccion.pk)
+        except Exception as exc:
+            logger.warning(
+                "Broker Celery no disponible (%s); no se genera el PDF de la inspección %s",
+                type(exc).__name__, inspeccion.pk,
+            )
+            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=generando).update(pdf_estado=anterior)
+            return Response(
+                {"error": "No se pudo iniciar la generación del PDF. Inténtalo en unos minutos."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(
-            {"task_id": task.id, "estado": inspeccion.pdf_estado, "mensaje": "Generación de PDF iniciada."},
+            {"task_id": task.id, "estado": generando, "mensaje": "Generación de PDF iniciada."},
             status=status.HTTP_202_ACCEPTED,
         )
 
