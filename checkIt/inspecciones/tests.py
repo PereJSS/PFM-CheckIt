@@ -1,6 +1,7 @@
 import hashlib
 import os
 import tempfile
+from datetime import timedelta
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 
@@ -8,6 +9,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from PIL import Image
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -455,11 +457,51 @@ class ClaimReportTest(APITestCase):
 
     def test_claim_report_returns_202_when_generando(self):
         self.insp.pdf_estado = Inspeccion.PdfEstado.GENERANDO
+        self.insp.pdf_generando_desde = timezone.now() - timedelta(minutes=1)
         self.insp.save()
         self.client.force_authenticate(user=self.admin)
         response = self.client.get(self._url(self.insp.pk))
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
         self.assertNotIn('task_id', response.data)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_reencola_un_generando_caducado(self, mock_task):
+        # El worker murió (SIGKILL, time_limit, reinicio) sin pasar por el except
+        mock_task.delay.return_value = MagicMock(id='t')
+        self.insp.pdf_estado = Inspeccion.PdfEstado.GENERANDO
+        self.insp.pdf_generando_desde = timezone.now() - timedelta(minutes=30)
+        self.insp.save()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.data['task_id'], 't')
+        mock_task.delay.assert_called_once_with(self.insp.pk)
+        self.insp.refresh_from_db()
+        self.assertGreater(self.insp.pdf_generando_desde, timezone.now() - timedelta(minutes=1))
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_reencola_un_generando_sin_fecha(self, mock_task):
+        # Filas de antes de pdf_generando_desde
+        mock_task.delay.return_value = MagicMock(id='t')
+        Inspeccion.objects.filter(pk=self.insp.pk).update(pdf_estado=Inspeccion.PdfEstado.GENERANDO)
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.data['task_id'], 't')
+        mock_task.delay.assert_called_once_with(self.insp.pk)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_claim_report_sin_broker_restaura_la_fecha_anterior(self, mock_task):
+        mock_task.delay.side_effect = ConnectionError('broker caído')
+        desde = timezone.now() - timedelta(minutes=30)
+        self.insp.pdf_estado = Inspeccion.PdfEstado.GENERANDO
+        self.insp.pdf_generando_desde = desde
+        self.insp.save()
+        self.client.force_authenticate(user=self.admin)
+        with self.assertLogs('inspecciones.views', level='WARNING'):
+            response = self.client.get(self._url(self.insp.pk))
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.insp.refresh_from_db()
+        # Sigue caducado: la próxima petición puede volver a intentarlo
+        self.assertEqual(self.insp.pdf_generando_desde, desde)
 
     def test_other_admin_cannot_download_report(self):
         self.client.force_authenticate(user=self.other_admin)
@@ -964,6 +1006,8 @@ class AlmacenamientoPdfTest(TestCase):
             with open(salida, 'wb') as f:
                 f.write(contenido)
 
+        # Como claim_report: reserva GENERANDO antes de encolar
+        Inspeccion.objects.filter(pk=self.insp.pk).update(pdf_estado=Inspeccion.PdfEstado.GENERANDO)
         with patch('inspecciones.services.pdf_signer.firmar_pdf_reclamacion', side_effect=firmar):
             generar_pdf_async.apply(args=[self.insp.pk]).get()
         self.insp.refresh_from_db()
@@ -1001,3 +1045,42 @@ class AlmacenamientoPdfTest(TestCase):
             pdf = f.read()
         self.assertIn(b'/Subtype /Image', pdf)
         self.assertNotIn(b'No se pudo cargar la foto', pdf)
+
+
+class GenerarPdfReintentoTest(TestCase):
+    """Mientras quedan reintentos el PDF sigue GENERANDO: con ERROR, claim_report
+    encolaría una segunda tarea en paralelo al reintento."""
+
+    def setUp(self):
+        admin = User.objects.create_user(username='admin_reintento', password='x', role=User.Role.ADMIN)
+        prop = Propiedad.objects.create(owner=admin, nombre='P', direccion='C')
+        self.insp = Inspeccion.objects.create(propiedad=prop)
+
+    def _estado(self):
+        self.insp.refresh_from_db()
+        return self.insp.pdf_estado
+
+    @patch('inspecciones.services.pdf_generator.generar_informe_base', side_effect=RuntimeError('fallo'))
+    def test_fallo_con_reintentos_pendientes_sigue_generando(self, _mock):
+        from celery.exceptions import Retry
+        from .tasks import generar_pdf_async
+        with patch.object(generar_pdf_async, 'retry', side_effect=Retry()):
+            generar_pdf_async.apply(args=[self.insp.pk])
+        self.assertEqual(self._estado(), Inspeccion.PdfEstado.GENERANDO)
+        # Cada intento renueva la fecha: claim_report no lo da por muerto
+        self.assertGreater(self.insp.pdf_generando_desde, timezone.now() - timedelta(minutes=1))
+
+    @patch('inspecciones.services.pdf_generator.generar_informe_base', side_effect=RuntimeError('fallo'))
+    def test_fallo_sin_reintentos_queda_error(self, _mock):
+        from .tasks import generar_pdf_async
+        generar_pdf_async.apply(args=[self.insp.pk], retries=generar_pdf_async.max_retries)
+        self.assertEqual(self._estado(), Inspeccion.PdfEstado.ERROR)
+
+    @patch('inspecciones.services.pdf_generator.generar_informe_base')
+    def test_tarea_duplicada_no_pisa_un_listo(self, mock_base):
+        # Otra ejecución (reencolada tras caducar en cola) ya lo dejó LISTO
+        Inspeccion.objects.filter(pk=self.insp.pk).update(pdf_estado=Inspeccion.PdfEstado.LISTO, pdf_ruta='x.pdf')
+        from .tasks import generar_pdf_async
+        generar_pdf_async.apply(args=[self.insp.pk])
+        mock_base.assert_not_called()
+        self.assertEqual(self._estado(), Inspeccion.PdfEstado.LISTO)

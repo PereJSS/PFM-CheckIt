@@ -248,6 +248,9 @@ SIMPLE_JWT = {
 BACKEND_PUBLIC_URL = config('BACKEND_PUBLIC_URL', default='https://pfm-checkit.onrender.com')
 # Validez del enlace de descarga del PDF que se envía en el webhook pdf.listo
 PDF_URL_CADUCIDAD_HORAS = config('PDF_URL_CADUCIDAD_HORAS', default=72, cast=int)
+# Un PDF en GENERANDO más tiempo que esto es de un worker muerto y se puede volver a pedir.
+# Un intento dura como mucho 300 s (time_limit) y el reintento espera 60 s
+PDF_GENERANDO_CADUCA_MIN = config('PDF_GENERANDO_CADUCA_MIN', default=15, cast=int)
 
 CORS_ALLOWED_ORIGINS = [
     'https://pfm-check-it.vercel.app',

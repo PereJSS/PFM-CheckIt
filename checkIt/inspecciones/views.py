@@ -23,7 +23,8 @@ from django.shortcuts import get_object_or_404
 from .models import Evidencia
 from django.http import HttpResponse
 from django.db import transaction
-from django.db.models import QuerySet
+from django.conf import settings
+from django.db.models import Q, QuerySet
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from typing import cast
@@ -274,10 +275,14 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         generando = Inspeccion.PdfEstado.GENERANDO
         # Reserva condicional antes de encolar: si se guardara después, un worker rápido
         # vería su LISTO pisado; y de dos peticiones a la vez solo encola una
-        anterior = inspeccion.pdf_estado
-        reservada = anterior != generando and Inspeccion.objects.filter(
-            pk=inspeccion.pk, pdf_estado=anterior,
-        ).update(pdf_estado=generando)
+        anterior, desde_anterior = inspeccion.pdf_estado, inspeccion.pdf_generando_desde
+        ahora = timezone.now()
+        libre = Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=anterior)
+        if anterior == generando:
+            # Solo si es de un worker muerto (o de antes de guardar la fecha)
+            caducado = ahora - timedelta(minutes=settings.PDF_GENERANDO_CADUCA_MIN)
+            libre = libre.filter(Q(pdf_generando_desde__isnull=True) | Q(pdf_generando_desde__lt=caducado))
+        reservada = libre.update(pdf_estado=generando, pdf_generando_desde=ahora)
         if not reservada:
             # Releído: si otra petición ganó la reserva, el estado puede ser ya otro
             actual = Inspeccion.objects.filter(pk=inspeccion.pk).values_list('pdf_estado', flat=True).first()
@@ -294,7 +299,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 "Broker Celery no disponible (%s); no se genera el PDF de la inspección %s",
                 type(exc).__name__, inspeccion.pk,
             )
-            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=generando).update(pdf_estado=anterior)
+            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=generando, pdf_generando_desde=ahora).update(
+                pdf_estado=anterior, pdf_generando_desde=desde_anterior,
+            )
             return Response(
                 {"error": "No se pudo iniciar la generación del PDF. Inténtalo en unos minutos."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,

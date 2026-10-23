@@ -188,6 +188,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `WEBHOOK_ENTREGAS_RETENCION_DIAS` | No | Días que se conservan las entregas cerradas (entregadas o fallidas) antes de la purga diaria vía Celery beat (por defecto `90`) |
 | `BACKEND_PUBLIC_URL` | No | URL pública del backend, base de los enlaces absolutos de los webhooks como `pdf_url` (por defecto `https://pfm-checkit.onrender.com`) |
 | `PDF_URL_CADUCIDAD_HORAS` | No | Validez en horas del enlace firmado de descarga del PDF que lleva el webhook `pdf.listo` (por defecto `72`) |
+| `PDF_GENERANDO_CADUCA_MIN` | No | Minutos tras los que un PDF que sigue en `GENERANDO` se da por perdido (worker muerto) y `claim-report` lo vuelve a encolar (por defecto `15`) |
 | `AWS_STORAGE_BUCKET_NAME` | En producción | Bucket S3 compatible (Cloudflare R2) para las fotos y los PDF. **Si está definida, se activa el almacenamiento en el bucket**; si no, se usa el disco local `media/`, que en Render se borra en cada deploy |
 | `AWS_ACCESS_KEY_ID` | Con bucket | Clave de acceso del token de API del bucket (en R2: *Manage R2 API Tokens*, permiso *Object Read & Write* sobre ese bucket) |
 | `AWS_SECRET_ACCESS_KEY` | Con bucket | Secreto de ese token |

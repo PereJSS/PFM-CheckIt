@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, time_limit=300, soft_time_limit=270)
 def generar_pdf_async(self, inspeccion_id):
+    from django.utils import timezone
+
     from .models import Inspeccion
     from .services import pdf_signer
     from .services.almacen import guardar_pdf
@@ -19,8 +21,15 @@ def generar_pdf_async(self, inspeccion_id):
 
     inspeccion = Inspeccion.objects.get(pk=inspeccion_id)
     try:
-        inspeccion.pdf_estado = Inspeccion.PdfEstado.GENERANDO
-        inspeccion.save(update_fields=['pdf_estado'])
+        # La fecha se renueva en cada intento: claim_report no da por muerto a un worker vivo.
+        # Si ya está LISTO, lo terminó otra ejecución (p. ej. reencolada tras caducar en cola)
+        ahora = timezone.now()
+        if not Inspeccion.objects.filter(pk=inspeccion.pk).exclude(pdf_estado=Inspeccion.PdfEstado.LISTO).update(
+            pdf_estado=Inspeccion.PdfEstado.GENERANDO, pdf_generando_desde=ahora,
+        ):
+            logger.info('El PDF de la inspección %s ya está listo: se descarta la tarea', inspeccion.pk)
+            return
+        inspeccion.pdf_estado, inspeccion.pdf_generando_desde = Inspeccion.PdfEstado.GENERANDO, ahora
 
         # Si el manifiesto aún no tiene sello, se intenta antes para que el PDF lo recoja.
         # Se recarga siempre: aunque la TSA falle, la raíz puede haberse congelado
@@ -49,8 +58,12 @@ def generar_pdf_async(self, inspeccion_id):
                 pdf_estado=Inspeccion.PdfEstado.PENDIENTE,
             )
     except Exception as exc:
-        inspeccion.pdf_estado = Inspeccion.PdfEstado.ERROR
-        inspeccion.save(update_fields=['pdf_estado'])
+        # ERROR solo al agotar los reintentos: antes, claim_report encolaría otra tarea en
+        # paralelo al reintento. Condicional para no pisar un LISTO de otra ejecución
+        if self.request.retries >= self.max_retries:
+            Inspeccion.objects.filter(pk=inspeccion.pk, pdf_estado=Inspeccion.PdfEstado.GENERANDO).update(
+                pdf_estado=Inspeccion.PdfEstado.ERROR,
+            )
         raise self.retry(exc=exc)
 
 

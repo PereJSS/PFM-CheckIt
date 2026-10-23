@@ -477,7 +477,10 @@ class PdfYReaperturaTest(_ConExpediente, TestCase):
         from .tasks import generar_pdf_async
         mock_base.side_effect = lambda insp, ruta: open(ruta, 'wb').close() or ruta
         mock_firma.side_effect = lambda entrada, salida: open(salida, 'wb').write(PDF)
-        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(pdf_manifiesto_raiz=None)
+        # Como claim_report: reserva GENERANDO antes de encolar
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            pdf_manifiesto_raiz=None, pdf_estado=Inspeccion.PdfEstado.GENERANDO,
+        )
         generar_pdf_async.apply(args=[self.inspeccion.pk])
         self.inspeccion.refresh_from_db()
         self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.LISTO)
@@ -494,6 +497,7 @@ class PdfYReaperturaTest(_ConExpediente, TestCase):
             open(salida, 'wb').write(PDF)
 
         mock_firma.side_effect = firmar_y_reabrir
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(pdf_estado=Inspeccion.PdfEstado.GENERANDO)
         generar_pdf_async.apply(args=[self.inspeccion.pk])
         self.inspeccion.refresh_from_db()
         self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
