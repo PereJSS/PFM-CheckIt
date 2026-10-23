@@ -153,6 +153,17 @@ export default function AdminPage() {
         responseType: "blob",
       });
       const blob = response.data;
+      // 202: el PDF aún se está generando y el cuerpo es JSON, no el fichero
+      if (response.status === 202) {
+        let mensaje = "El PDF se está generando.";
+        try {
+          mensaje = JSON.parse(await blob.text()).mensaje || mensaje;
+        } catch {
+          // Mantener mensaje por defecto si no es JSON.
+        }
+        alert(`${mensaje} Vuelve a intentarlo en unos segundos.`);
+        return;
+      }
       const fallbackName = descarga.nombre(id);
       const filename = getDownloadFilename(response.headers, fallbackName);
       const url = window.URL.createObjectURL(blob);
