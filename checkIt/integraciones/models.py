@@ -132,6 +132,8 @@ class WebhookDestino(models.Model):
     secreto = models.CharField(max_length=80, default=generar_secreto_webhook, editable=False)
     eventos = models.JSONField(default=_eventos_por_defecto)
     activo = models.BooleanField(default=True)
+    # Último número de secuencia asignado a una entrega de este destino
+    ultima_secuencia = models.PositiveBigIntegerField(default=0, editable=False)
     creado = models.DateTimeField(auto_now_add=True)
     actualizado = models.DateTimeField(auto_now=True)
 
@@ -139,6 +141,15 @@ class WebhookDestino(models.Model):
     def secreto_prefijo(self):
         # Pista para identificarlo: últimos 4 caracteres (no reduce la entropía útil)
         return f"{SECRETO_PREFIX}_…{self.secreto[-4:]}"
+
+    def save(self, *args, **kwargs):
+        # ultima_secuencia solo la escribe salientes._siguiente_secuencia (UPDATE con F()):
+        # un save() completo con una instancia leída antes de un despacho la haría retroceder
+        if not self._state.adding and kwargs.get('update_fields') is None and not kwargs.get('force_insert'):
+            kwargs['update_fields'] = [
+                f.name for f in self._meta.concrete_fields if not f.primary_key and f.name != 'ultima_secuencia'
+            ]
+        super().save(*args, **kwargs)
 
     def rotar_secreto(self):
         self.secreto = generar_secreto_webhook()
@@ -174,6 +185,8 @@ class EntregaWebhook(models.Model):
         'EventoSaliente', on_delete=models.SET_NULL, null=True, blank=True, related_name='entregas',
     )
     payload = models.JSONField(default=dict)
+    # Número consecutivo por destino (NULL en las anteriores): el PMS detecta huecos
+    secuencia = models.PositiveBigIntegerField(blank=True, null=True)
     estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.PENDIENTE)
     intentos = models.PositiveIntegerField(default=0)
     ultimo_codigo = models.PositiveSmallIntegerField(blank=True, null=True)

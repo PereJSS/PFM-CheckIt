@@ -91,5 +91,6 @@ class EntregaWebhookSerializer(serializers.ModelSerializer):
         model = EntregaWebhook
         fields = (
             'id', 'destino', 'destino_url', 'evento', 'event_id', 'entrega_id', 'inspeccion',
-            'payload', 'estado', 'intentos', 'ultimo_codigo', 'error', 'creada', 'actualizada', 'entregada',
+            'payload', 'secuencia', 'estado', 'intentos', 'ultimo_codigo', 'error', 'creada', 'actualizada',
+            'entregada',
         )

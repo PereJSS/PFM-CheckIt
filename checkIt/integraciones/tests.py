@@ -1490,3 +1490,73 @@ class BarridoOutboxTest(BaseSalientesTest):
             despachar_pendientes()
         evento.refresh_from_db()
         self.assertEqual((evento.estado, evento.intentos), (EventoSaliente.Estado.PENDIENTE, 0))
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class SecuenciaTest(BaseSalientesTest):
+    """Cada destino numera sus entregas: el PMS detecta huecos (eventos que no le llegaron)."""
+
+    def _emitir(self, tipo='inspeccion.completada'):
+        from .salientes import emitir_evento
+        with self.captureOnCommitCallbacks(execute=True):
+            emitir_evento(tipo, self.inspeccion)
+
+    def test_secuencia_consecutiva_por_destino(self, mock_encolar):
+        for _ in range(3):
+            self._emitir()
+        entregas = EntregaWebhook.objects.order_by('pk')
+        self.assertEqual([e.secuencia for e in entregas], [1, 2, 3])
+        self.assertEqual([e.payload['secuencia'] for e in entregas], [1, 2, 3])
+        self.destino.refresh_from_db()
+        self.assertEqual(self.destino.ultima_secuencia, 3)
+
+    def test_cada_destino_tiene_su_secuencia_y_comparten_event_id(self, mock_encolar):
+        self._emitir()
+        otro = WebhookDestino.objects.create(owner=self.admin, url='https://b.example.com/hook')
+        self._emitir()
+        self.assertEqual(
+            list(EntregaWebhook.objects.filter(destino=self.destino).values_list('secuencia', flat=True)), [1, 2],
+        )
+        segunda = list(EntregaWebhook.objects.filter(event_id=EntregaWebhook.objects.get(destino=otro).event_id))
+        self.assertEqual(sorted(e.secuencia for e in segunda), [1, 2])
+
+    def test_si_el_despacho_falla_no_se_consume_numero(self, mock_encolar):
+        otro = WebhookDestino.objects.create(owner=self.admin, url='https://b.example.com/hook')
+        original = EntregaWebhook.objects.create
+
+        def falla_en_el_segundo(**campos):
+            if campos['destino'] == otro:
+                raise RuntimeError('boom')
+            return original(**campos)
+        with patch.object(EntregaWebhook.objects, 'create', side_effect=falla_en_el_segundo), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            self._emitir()
+        self.assertFalse(EntregaWebhook.objects.exists())
+        self.assertEqual(
+            list(WebhookDestino.objects.order_by('pk').values_list('ultima_secuencia', flat=True)), [0, 0],
+        )
+
+    def test_destino_inactivo_o_sin_suscripcion_no_consume_numero(self, mock_encolar):
+        inactivo = WebhookDestino.objects.create(owner=self.admin, url='https://b.example.com', activo=False)
+        solo_pdf = WebhookDestino.objects.create(owner=self.admin, url='https://c.example.com', eventos=['pdf.listo'])
+        self._emitir()
+        for destino in (inactivo, solo_pdf):
+            destino.refresh_from_db()
+            self.assertEqual(destino.ultima_secuencia, 0)
+
+    def test_la_api_de_entregas_muestra_la_secuencia(self, mock_encolar):
+        self._emitir()
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(ENTREGAS_URL)
+        self.assertEqual(resp.data[0]['secuencia'], 1)
+
+    def test_guardar_un_destino_leido_antes_no_hace_retroceder_la_secuencia(self, mock_encolar):
+        # PATCH de la API o admin con la instancia leída antes de un despacho
+        obsoleto = WebhookDestino.objects.get(pk=self.destino.pk)
+        self._emitir()
+        obsoleto.nombre = 'Renombrado'
+        obsoleto.save()
+        self.destino.refresh_from_db()
+        self.assertEqual((self.destino.nombre, self.destino.ultima_secuencia), ('Renombrado', 1))
+        self._emitir()
+        self.assertEqual(EntregaWebhook.objects.order_by('-pk').first().secuencia, 2)

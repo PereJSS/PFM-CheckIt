@@ -239,20 +239,30 @@ def _con_enlace_pdf(tipo, inspeccion_id, datos):
     }
 
 
-def _sobre(event_id, tipo, datos, ocurrido):
+def _sobre(event_id, tipo, datos, ocurrido, secuencia=None):
     # `fecha` es la del envío (el receptor rechaza las antiguas); `ocurrido`, la del cambio
-    return {
+    sobre = {
         'event_id': str(event_id),
         'tipo': tipo,
         'fecha': timezone.now().isoformat(),
         'ocurrido': ocurrido.isoformat(),
         'data': datos,
     }
+    if secuencia is not None:
+        sobre['secuencia'] = secuencia
+    return sobre
 
 
 def construir_payload(tipo, inspeccion, event_id):
     datos = _con_enlace_pdf(tipo, inspeccion.pk, construir_datos(tipo, inspeccion))
     return _sobre(event_id, tipo, datos, timezone.now())
+
+
+def _siguiente_secuencia(destino_id):
+    """Siguiente número del destino. El UPDATE bloquea su fila hasta el commit: dos
+    despachos a la vez se ordenan y un rollback devuelve el número (sin huecos falsos)."""
+    WebhookDestino.objects.filter(pk=destino_id).update(ultima_secuencia=F('ultima_secuencia') + 1)
+    return WebhookDestino.objects.filter(pk=destino_id).values_list('ultima_secuencia', flat=True).get()
 
 
 def _testigo_manifiesto(inspeccion_id):
@@ -357,13 +367,14 @@ def despachar_evento(evento_id):
                 inspeccion = Inspeccion.objects.select_related('propiedad').get(pk=evento.inspeccion_id)
                 datos = construir_datos(evento.tipo, inspeccion)
             datos = _con_enlace_pdf(evento.tipo, evento.inspeccion_id, datos)
-            entregas = [
-                EntregaWebhook.objects.create(
-                    destino=d, evento=evento.tipo, event_id=evento.event_id, evento_saliente=evento,
-                    inspeccion_id=evento.inspeccion_id, payload=_sobre(evento.event_id, evento.tipo, datos, evento.creado),
-                )
-                for d in _destinos_suscritos(evento.owner_id, evento.tipo, hasta=evento.creado)
-            ]
+            entregas = []
+            for destino in _destinos_suscritos(evento.owner_id, evento.tipo, hasta=evento.creado):
+                secuencia = _siguiente_secuencia(destino.pk)
+                entregas.append(EntregaWebhook.objects.create(
+                    destino=destino, evento=evento.tipo, event_id=evento.event_id, evento_saliente=evento,
+                    inspeccion_id=evento.inspeccion_id, secuencia=secuencia,
+                    payload=_sobre(evento.event_id, evento.tipo, datos, evento.creado, secuencia),
+                ))
             _cerrar_evento(evento.pk, EventoSaliente.Estado.DESPACHADO)
             for entrega in entregas:
                 # robust: un fallo al encolar no es un fallo del despacho (ya está DESPACHADO)
