@@ -10,3 +10,6 @@ certificados/
 checkIt/certs/
 *.p12
 *.pfx
+
+# PDF intermedios que genera pdf_generator.py
+checkIt/tmp/
