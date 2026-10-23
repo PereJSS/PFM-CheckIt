@@ -295,7 +295,13 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': 300.0,
         'options': {'expires': 300},
     },
-    # Webhooks salientes: purga diaria de entregas cerradas (WEBHOOK_ENTREGAS_RETENCION_DIAS)
+    # Webhooks salientes: reparte los eventos del outbox que el despacho en línea no repartió
+    'despachar-eventos-salientes': {
+        'task': 'integraciones.tasks.despachar_eventos_salientes',
+        'schedule': 300.0,
+        'options': {'expires': 300},
+    },
+    # Webhooks salientes: purga diaria de entregas y eventos cerrados (WEBHOOK_ENTREGAS_RETENCION_DIAS)
     'purgar-entregas-webhook': {
         'task': 'integraciones.tasks.purgar_entregas_webhook',
         'schedule': 24 * 3600.0,

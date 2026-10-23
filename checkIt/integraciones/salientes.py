@@ -20,7 +20,7 @@ import requests
 from celery.exceptions import SoftTimeLimitExceeded
 from decouple import config
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Count, F
 from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util import parse_url
@@ -36,6 +36,10 @@ BACKOFF_BASE = config('WEBHOOK_SALIENTE_BACKOFF_BASE', default=30, cast=int)
 MAX_DESTINOS = config('WEBHOOK_SALIENTE_MAX_DESTINOS', default=10, cast=int)
 # Fallos al repartir un evento del outbox tras los que se descarta
 MAX_INTENTOS_DESPACHO = config('WEBHOOK_SALIENTE_MAX_INTENTOS_DESPACHO', default=5, cast=int)
+# El barrido despacha los eventos PENDIENTE con más de GRACIA (el despacho en línea pudo
+# no terminar) y descarta los de más de VENTANA: avisar tan tarde confundiría al PMS
+GRACIA_DESPACHO = timedelta(seconds=config('WEBHOOK_SALIENTE_GRACIA_SEG', default=120, cast=int))
+VENTANA_DESPACHO = timedelta(hours=config('WEBHOOK_SALIENTE_VENTANA_HORAS', default=48, cast=int))
 # Días que se conservan las entregas cerradas antes de la purga periódica
 RETENCION_DIAS = config('WEBHOOK_ENTREGAS_RETENCION_DIAS', default=90, cast=int)
 # Solo para desarrollo: permite http y destinos locales/privados
@@ -365,6 +369,9 @@ def despachar_evento(evento_id):
                 # robust: un fallo al encolar no es un fallo del despacho (ya está DESPACHADO)
                 transaction.on_commit(lambda pk=entrega.pk: encolar_entrega(pk), robust=True)
         return entregas
+    except SoftTimeLimitExceeded:
+        # El barrido se queda sin tiempo: no es un fallo de este evento
+        raise
     except Exception as exc:
         logger.exception("No se pudo despachar el evento saliente %s", evento_id)
         try:
@@ -373,6 +380,31 @@ def despachar_evento(evento_id):
             # BD caída: el evento sigue PENDIENTE y lo recoge el barrido
             logger.exception("No se pudo anotar el fallo del evento saliente %s", evento_id)
         return []
+
+
+def despachar_pendientes(limite=100):
+    """Barrido periódico del outbox: despacha los PENDIENTE que el despacho en línea no
+    repartió (proceso muerto, fallo) y descarta los que pasan de la ventana."""
+    ahora = timezone.now()
+    caducados = EventoSaliente.objects.filter(
+        estado=EventoSaliente.Estado.PENDIENTE, creado__lt=ahora - VENTANA_DESPACHO,
+    )
+    por_tipo = dict(caducados.values_list('tipo').annotate(n=Count('pk')))
+    descartados = caducados.update(estado=EventoSaliente.Estado.DESCARTADO, error='Fuera de la ventana de despacho.')
+    if descartados:
+        logger.error("%s eventos salientes descartados sin entregar (fuera de la ventana de despacho): %s",
+                     descartados, por_tipo)
+    ids = list(
+        EventoSaliente.objects.filter(estado=EventoSaliente.Estado.PENDIENTE, creado__lt=ahora - GRACIA_DESPACHO)
+        .order_by('creado').values_list('pk', flat=True)[:limite]
+    )
+    try:
+        for pk in ids:
+            despachar_evento(pk)
+    except SoftTimeLimitExceeded:
+        logger.warning("Barrido del outbox cortado por tiempo: el resto queda para la siguiente ejecución")
+    despachados = EventoSaliente.objects.filter(pk__in=ids, estado=EventoSaliente.Estado.DESPACHADO).count()
+    return {'despachados': despachados, 'descartados': descartados}
 
 
 def _cerrar_evento(evento_id, estado, error=''):
@@ -524,17 +556,26 @@ def reencolar_atascadas(limite=100):
 
 def purgar_entregas_antiguas(dias=RETENCION_DIAS, lote=500):
     """
-    Borra por lotes las entregas cerradas (ENTREGADA/FALLIDA) creadas hace más de
-    `dias`. Las PENDIENTE nunca se tocan. Devuelve cuántas se borraron.
+    Borra por lotes las entregas cerradas (ENTREGADA/FALLIDA) y los eventos del outbox
+    cerrados (DESPACHADO/DESCARTADO) creados hace más de `dias`. Lo PENDIENTE nunca se
+    toca. Devuelve cuántas filas se borraron.
     """
     corte = timezone.now() - timedelta(days=dias)
-    cerradas = EntregaWebhook.objects.filter(
+    entregas = EntregaWebhook.objects.filter(
         estado__in=[EntregaWebhook.Estado.ENTREGADA, EntregaWebhook.Estado.FALLIDA], creada__lt=corte,
     )
+    eventos = EventoSaliente.objects.filter(
+        estado__in=[EventoSaliente.Estado.DESPACHADO, EventoSaliente.Estado.DESCARTADO], creado__lt=corte,
+    )
+    return _borrar_por_lotes(entregas, lote) + _borrar_por_lotes(eventos, lote)
+
+
+def _borrar_por_lotes(cerradas, lote):
     borradas = 0
     while True:
         # Por lotes de ids: un DELETE masivo bloquearía la tabla mucho rato
         ids = list(cerradas.order_by('pk').values_list('pk', flat=True)[:lote])
         if not ids:
             return borradas
-        borradas += EntregaWebhook.objects.filter(pk__in=ids).delete()[0]
+        # Solo las filas de este modelo: borrar un evento deja sus entregas con SET_NULL
+        borradas += cerradas.model.objects.filter(pk__in=ids).delete()[1].get(cerradas.model._meta.label, 0)

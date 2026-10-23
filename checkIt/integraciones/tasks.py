@@ -1,5 +1,9 @@
+import logging
+
 from celery import shared_task
 from decouple import config
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=30, time_limit=60, soft_time_limit=50)
@@ -48,6 +52,17 @@ def reencolar_entregas_atascadas():
     from .salientes import reencolar_atascadas
 
     return reencolar_atascadas()
+
+
+@shared_task(time_limit=120, soft_time_limit=100)
+def despachar_eventos_salientes():
+    """Tarea periódica (Celery beat): reparte los eventos del outbox que quedaron PENDIENTE."""
+    from .salientes import despachar_pendientes
+
+    resultado = despachar_pendientes()
+    if any(resultado.values()):
+        logger.info('Barrido del outbox de webhooks: %s', resultado)
+    return resultado
 
 
 @shared_task(time_limit=600, soft_time_limit=540)

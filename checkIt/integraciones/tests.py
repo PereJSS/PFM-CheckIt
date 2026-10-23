@@ -1407,3 +1407,86 @@ class CompletarAtomicoTest(APITransactionTestCase):
             resp = self.client.patch(f'/api/v1/inspecciones/{inspeccion.pk}/', {'estado': 'COMPLETADA'}, format='json')
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(anidado, [True])
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class BarridoOutboxTest(BaseSalientesTest):
+    """La tarea periódica despacha lo que quedó PENDIENTE (proceso muerto, fallo al
+    repartir) y descarta lo que lleva demasiado tiempo esperando."""
+
+    def setUp(self):
+        super().setUp()
+        WebhookDestino.objects.filter(pk=self.destino.pk).update(creado=timezone.now() - timedelta(days=10))
+
+    def _pendiente(self, hace):
+        evento = EventoSaliente.objects.create(
+            owner=self.admin, tipo='inspeccion.completada', inspeccion=self.inspeccion, datos={'inspeccion_id': 1},
+        )
+        EventoSaliente.objects.filter(pk=evento.pk).update(creado=timezone.now() - hace)
+        return evento
+
+    def test_despacha_los_pendientes_pasada_la_gracia(self, mock_encolar):
+        from .salientes import despachar_pendientes
+        evento = self._pendiente(timedelta(minutes=10))
+        with self.captureOnCommitCallbacks(execute=True):
+            despachar_pendientes()
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.DESPACHADO)
+        self.assertEqual(EntregaWebhook.objects.get().evento_saliente, evento)
+        mock_encolar.assert_called_once()
+
+    def test_no_toca_los_recientes(self, mock_encolar):
+        # El despacho en línea aún puede estar en curso
+        from .salientes import despachar_pendientes
+        evento = self._pendiente(timedelta(seconds=5))
+        despachar_pendientes()
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+
+    def test_descarta_los_que_pasan_de_la_ventana_sin_entregarlos(self, mock_encolar):
+        from .salientes import despachar_pendientes
+        evento = self._pendiente(timedelta(days=3))
+        with self.assertLogs('integraciones.salientes', level='ERROR'):
+            despachar_pendientes()
+        evento.refresh_from_db()
+        self.assertEqual(evento.estado, EventoSaliente.Estado.DESCARTADO)
+        self.assertIn('ventana', evento.error)
+        self.assertEqual(EntregaWebhook.objects.count(), 0)
+
+    def test_tarea_periodica_registrada(self, mock_encolar):
+        from django.conf import settings
+        from .tasks import despachar_eventos_salientes
+        tareas = {c['task'] for c in settings.CELERY_BEAT_SCHEDULE.values()}
+        self.assertIn('integraciones.tasks.despachar_eventos_salientes', tareas)
+        self._pendiente(timedelta(minutes=10))
+        self.assertEqual(despachar_eventos_salientes.apply().get(), {'despachados': 1, 'descartados': 0})
+
+    def test_la_purga_borra_el_outbox_cerrado_antiguo_y_conserva_el_pendiente(self, mock_encolar):
+        from .salientes import RETENCION_DIAS, purgar_entregas_antiguas
+        pendiente_antiguo = self._pendiente(timedelta(days=RETENCION_DIAS + 1))
+        cerrado_antiguo = self._pendiente(timedelta(days=RETENCION_DIAS + 1))
+        EventoSaliente.objects.filter(pk=cerrado_antiguo.pk).update(estado=EventoSaliente.Estado.DESPACHADO)
+        cerrado_reciente = self._pendiente(timedelta(days=1))
+        EventoSaliente.objects.filter(pk=cerrado_reciente.pk).update(estado=EventoSaliente.Estado.DESCARTADO)
+        purgar_entregas_antiguas()
+        self.assertEqual(
+            set(EventoSaliente.objects.values_list('pk', flat=True)), {pendiente_antiguo.pk, cerrado_reciente.pk},
+        )
+
+    def test_mezcla_de_caducados_y_pendientes_en_un_barrido(self, mock_encolar):
+        from .salientes import despachar_pendientes
+        self._pendiente(timedelta(days=3))
+        self._pendiente(timedelta(minutes=10))
+        with self.assertLogs('integraciones.salientes', level='ERROR') as logs, \
+                self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(despachar_pendientes(), {'despachados': 1, 'descartados': 1})
+        self.assertIn('inspeccion.completada', logs.output[0])
+
+    def test_sin_tiempo_corta_el_barrido_sin_contarlo_como_fallo(self, mock_encolar):
+        from .salientes import despachar_pendientes
+        evento = self._pendiente(timedelta(minutes=10))
+        with patch('integraciones.salientes._destinos_suscritos', side_effect=SoftTimeLimitExceeded()), \
+                self.assertLogs('integraciones.salientes', level='WARNING'):
+            despachar_pendientes()
+        evento.refresh_from_db()
+        self.assertEqual((evento.estado, evento.intentos), (EventoSaliente.Estado.PENDIENTE, 0))
