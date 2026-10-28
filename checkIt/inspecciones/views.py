@@ -253,6 +253,21 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             return Response({"error": "Solo el administrador propietario puede eliminar inspecciones."}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
 
+    @extend_schema(
+        summary='Descargar el PDF firmado (lo genera en segundo plano si no está listo)',
+        responses={
+            (200, 'application/pdf'): OpenApiTypes.BINARY,
+            202: inline_serializer('PdfEnGeneracion', {
+                'task_id': drf_serializers.CharField(required=False, help_text='Solo si esta petición inició la generación'),
+                'estado': drf_serializers.ChoiceField(choices=Inspeccion.PdfEstado.choices),
+                'mensaje': drf_serializers.CharField(),
+            }),
+            403: OpenApiResponse(description='Solo el administrador propietario'),
+            404: OpenApiResponse(description='La inspección no existe'),
+            503: OpenApiResponse(description='No se pudo encolar la generación (broker no disponible)'),
+        },
+        description='Con 202, consultar `claim-report-status` hasta `pdf_listo` y volver a pedir el PDF.',
+    )
     @action(detail=True, methods=['get'], url_path='claim-report')
     def claim_report(self, request, pk=None):
         usuario = request.user
@@ -317,6 +332,17 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @extend_schema(
+        summary='Estado de la generación del PDF firmado',
+        responses={
+            200: inline_serializer('EstadoPdf', {
+                'estado': drf_serializers.ChoiceField(choices=Inspeccion.PdfEstado.choices),
+                'pdf_listo': drf_serializers.BooleanField(),
+            }),
+            403: OpenApiResponse(description='Solo el administrador propietario'),
+            404: OpenApiResponse(description='La inspección no existe'),
+        },
+    )
     @action(detail=True, methods=['get'], url_path='claim-report-status')
     def claim_report_status(self, request, pk=None):
         usuario = request.user

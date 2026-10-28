@@ -16,3 +16,13 @@ class OpenApiDocsTest(_APITestCase):
     def test_swagger_and_redoc_public(self):
         self.assertEqual(self.client.get('/api/v1/docs/').status_code, 200)
         self.assertEqual(self.client.get('/api/v1/redoc/').status_code, 200)
+
+    def test_claim_report_documenta_sus_respuestas(self):
+        paths = self.client.get('/api/v1/schema/?format=json').json()['paths']
+        informe = paths['/api/v1/inspecciones/{id}/claim-report/']['get']['responses']
+        self.assertEqual(set(informe), {'200', '202', '403', '404', '503'})
+        self.assertIn('application/pdf', informe['200']['content'])
+        estado = paths['/api/v1/inspecciones/{id}/claim-report-status/']['get']['responses']
+        self.assertEqual(set(estado), {'200', '403', '404'})
+        propiedades = self.client.get('/api/v1/schema/?format=json').json()['components']['schemas']
+        self.assertEqual(set(propiedades['EstadoPdf']['properties']), {'estado', 'pdf_listo'})
