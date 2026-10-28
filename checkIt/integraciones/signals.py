@@ -14,9 +14,11 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from inspecciones.models import Inspeccion
-from inspecciones.signals import manifiesto_sellado, pdf_listo
+from inspecciones.signals import manifiesto_reabierto, manifiesto_sellado, pdf_listo
 
-from .models import EVENTO_INSPECCION_COMPLETADA, EVENTO_MANIFIESTO_SELLADO, EVENTO_PDF_LISTO
+from .models import (
+    EVENTO_INSPECCION_COMPLETADA, EVENTO_INSPECCION_REABIERTA, EVENTO_MANIFIESTO_SELLADO, EVENTO_PDF_LISTO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +70,20 @@ def emitir_manifiesto_sellado(sender, inspeccion, raiz=None, **kwargs):
     _emitir(EVENTO_MANIFIESTO_SELLADO, inspeccion)
 
 
-def _emitir(tipo, inspeccion):
+@receiver(manifiesto_reabierto, dispatch_uid='integraciones_manifiesto_reabierto')
+def emitir_inspeccion_reabierta(sender, inspeccion, raiz=None, sellada=False, tsa_timestamp=None, **kwargs):
+    # La raíz ya no está en la inspección: viaja en el evento
+    reapertura = {'raiz': raiz, 'sellada': sellada, 'tsa_timestamp': tsa_timestamp}
+    _emitir(EVENTO_INSPECCION_REABIERTA, inspeccion, extra={'reapertura': reapertura})
+
+
+def _emitir(tipo, inspeccion, extra=None):
     from .salientes import emitir_evento
 
     try:
         # Savepoint: un fallo al emitir no debe romper el guardado de la inspección
         with transaction.atomic():
-            emitir_evento(tipo, inspeccion)
+            emitir_evento(tipo, inspeccion, extra=extra)
     except Exception:
-        logger.exception("No se pudo emitir el webhook %s de la inspección %s", tipo, inspeccion.pk)
+        # Con `extra`: es lo único que no se puede reconstruir (p. ej. la raíz reabierta)
+        logger.exception("No se pudo emitir el webhook %s de la inspección %s (extra=%s)", tipo, inspeccion.pk, extra)

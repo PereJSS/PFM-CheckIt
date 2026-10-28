@@ -927,7 +927,10 @@ class WebhookDestinoApiTest(BaseIntegracionTest):
         resp = self.client.post(DESTINOS_URL, {'url': 'https://pms.example.com/hook'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(resp.data['secreto'].startswith('whsec_'))
-        self.assertEqual(resp.data['eventos'], ['inspeccion.completada', 'pdf.listo', 'manifiesto.sellado'])
+        self.assertEqual(
+            resp.data['eventos'],
+            ['inspeccion.completada', 'pdf.listo', 'manifiesto.sellado', 'inspeccion.reabierta'],
+        )
         destino = WebhookDestino.objects.get()
         self.assertEqual(destino.owner, self.admin)
         self.assertEqual(destino.secreto, resp.data['secreto'])
@@ -1560,3 +1563,166 @@ class SecuenciaTest(BaseSalientesTest):
         self.assertEqual((self.destino.nombre, self.destino.ultima_secuencia), ('Renombrado', 1))
         self._emitir()
         self.assertEqual(EntregaWebhook.objects.order_by('-pk').first().secuencia, 2)
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class ReaperturaTest(BaseSalientesTest):
+    """inspeccion.reabierta: el PMS sabe que la raíz que guardó ya no es la vigente."""
+
+    def _sellar(self):
+        from inspecciones.services.manifiesto import sellar_manifiesto
+        datos = {'token': b'tst', 'url': 'https://tsa.example/tsr', 'cualificada': False,
+                 'verificado': True, 'timestamp': timezone.now()}
+        with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=datos), \
+                self.captureOnCommitCallbacks(execute=True):
+            self.assertTrue(sellar_manifiesto(self.inspeccion.pk))
+
+    def _reabrir(self, ejecutar=True):
+        self.inspeccion.refresh_from_db()
+        self.inspeccion.estado = Inspeccion.Estado.EN_PROGRESO
+        with self.captureOnCommitCallbacks(execute=ejecutar):
+            self.inspeccion.save()
+
+    def _reapertura(self):
+        return EntregaWebhook.objects.get(evento='inspeccion.reabierta').payload['data']
+
+    def test_reabrir_sellada_avisa_con_la_raiz_y_el_sello(self, mock_encolar):
+        self._completar()
+        self._sellar()
+        self.inspeccion.refresh_from_db()
+        raiz, sello = self.inspeccion.manifiesto_raiz, self.inspeccion.manifiesto_tsa_timestamp
+        self._reabrir()
+        datos = self._reapertura()
+        self.assertEqual(datos['reapertura'], {'raiz': raiz, 'sellada': True, 'tsa_timestamp': sello.isoformat()})
+        self.assertEqual(datos['estado'], Inspeccion.Estado.EN_PROGRESO)
+        self.assertNotIn('manifiesto', datos)
+        self.assertEqual(EventoSaliente.objects.get(tipo='inspeccion.reabierta').estado,
+                         EventoSaliente.Estado.DESPACHADO)
+
+    def test_reabrir_sin_sello_tambien_avisa(self, mock_encolar):
+        self._completar()
+        self.inspeccion.refresh_from_db()
+        raiz = self.inspeccion.manifiesto_raiz
+        self._reabrir()
+        self.assertEqual(self._reapertura()['reapertura'], {'raiz': raiz, 'sellada': False, 'tsa_timestamp': None})
+
+    def test_sin_raiz_no_avisa(self, mock_encolar):
+        self.inspeccion.estado = Inspeccion.Estado.EN_PROGRESO
+        self.inspeccion.save()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(estado=Inspeccion.Estado.COMPLETADA)
+        self._reabrir()
+        self.assertFalse(EventoSaliente.objects.filter(tipo='inspeccion.reabierta').exists())
+
+    def test_respeta_la_suscripcion(self, mock_encolar):
+        self.destino.eventos = ['inspeccion.completada']
+        self.destino.save()
+        self._completar()
+        self._reabrir()
+        self.assertFalse(EventoSaliente.objects.filter(tipo='inspeccion.reabierta').exists())
+        self.assertFalse(EntregaWebhook.objects.filter(evento='inspeccion.reabierta').exists())
+
+    def test_si_el_worker_muere_el_evento_conserva_la_reapertura(self, mock_encolar):
+        self._completar()
+        self.inspeccion.refresh_from_db()
+        raiz = self.inspeccion.manifiesto_raiz
+        self._reabrir(ejecutar=False)
+        evento = EventoSaliente.objects.get(tipo='inspeccion.reabierta')
+        self.assertEqual(evento.estado, EventoSaliente.Estado.PENDIENTE)
+        self.assertEqual(evento.datos['reapertura']['raiz'], raiz)
+
+    def test_si_fallan_los_datos_se_guarda_la_reapertura_y_se_completa_al_despachar(self, mock_encolar):
+        from . import salientes
+        self._completar()
+        self.inspeccion.refresh_from_db()
+        raiz = self.inspeccion.manifiesto_raiz
+        original = salientes.construir_datos
+        llamadas = []
+
+        def falla_la_primera(*args, **kwargs):
+            llamadas.append(1)
+            if len(llamadas) == 1:
+                raise RuntimeError('boom')
+            return original(*args, **kwargs)
+        with patch('integraciones.salientes.construir_datos', side_effect=falla_la_primera), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            self._reabrir(ejecutar=False)
+        evento = EventoSaliente.objects.get(tipo='inspeccion.reabierta')
+        self.assertEqual(set(evento.datos), {'_extra'})
+        self.assertEqual(evento.datos['_extra']['reapertura']['raiz'], raiz)
+        with self.captureOnCommitCallbacks(execute=True):
+            salientes.despachar_evento(evento.pk)
+        datos = self._reapertura()
+        self.assertNotIn('_extra', datos)
+        self.assertEqual(datos['reapertura']['raiz'], raiz)
+        self.assertEqual(datos['inspeccion_id'], self.inspeccion.pk)
+
+    def test_si_se_deshace_la_reapertura_no_queda_aviso(self, mock_encolar):
+        from django.db import transaction
+        self._completar()
+        mock_encolar.reset_mock()
+        with self.assertRaises(RuntimeError), transaction.atomic():
+            self._reabrir(ejecutar=False)
+            self.assertTrue(EventoSaliente.objects.filter(tipo='inspeccion.reabierta').exists())
+            raise RuntimeError('rollback')
+        self.assertFalse(EventoSaliente.objects.filter(tipo='inspeccion.reabierta').exists())
+        self.assertFalse(EntregaWebhook.objects.filter(evento='inspeccion.reabierta').exists())
+        mock_encolar.assert_not_called()
+
+    def test_reabrir_y_recompletar_sale_en_orden(self, mock_encolar):
+        self._completar()
+        self._reabrir()
+        self._completar()
+        entregas = EntregaWebhook.objects.order_by('secuencia')
+        self.assertEqual(
+            [(e.secuencia, e.evento) for e in entregas],
+            [(1, 'inspeccion.completada'), (2, 'inspeccion.reabierta'), (3, 'inspeccion.completada')],
+        )
+
+    def test_despacho_tardio_no_mezcla_el_manifiesto_de_una_recompletacion(self, mock_encolar):
+        from . import salientes
+        self._completar()
+        self.inspeccion.refresh_from_db()
+        raiz = self.inspeccion.manifiesto_raiz
+        with patch('integraciones.salientes.construir_datos', side_effect=RuntimeError('boom')), \
+                self.assertLogs('integraciones.salientes', level='ERROR'):
+            self._reabrir(ejecutar=False)
+        evento = EventoSaliente.objects.get(tipo='inspeccion.reabierta')
+        # Se vuelve a completar (con otra evidencia: otra raíz) antes de que el barrido lo despache
+        self.inspeccion.refresh_from_db()
+        self.inspeccion.estado = Inspeccion.Estado.COMPLETADA
+        with self.captureOnCommitCallbacks(execute=False):
+            self.inspeccion.save()
+        with self.captureOnCommitCallbacks(execute=True):
+            salientes.despachar_evento(evento.pk)
+        datos = self._reapertura()
+        self.assertEqual(datos['reapertura']['raiz'], raiz)
+        self.assertNotIn('manifiesto', datos)
+
+    def test_extra_no_pisa_la_base(self, mock_encolar):
+        from .salientes import registrar_evento
+        with self.captureOnCommitCallbacks(execute=True):
+            registrar_evento('inspeccion.reabierta', self.inspeccion, extra={'inspeccion_id': 0, 'reapertura': {}})
+        datos = self._reapertura()
+        self.assertEqual((datos['inspeccion_id'], datos['reapertura']), (self.inspeccion.pk, {}))
+
+
+class MigracionSuscribirReabiertaTest(BaseIntegracionTest):
+    def test_suscribe_a_los_destinos_que_guardan_la_raiz(self):
+        from importlib import import_module
+
+        from django.apps import apps
+        migracion = import_module('integraciones.migrations.0005_suscribir_inspeccion_reabierta')
+        crear = WebhookDestino.objects.create
+        completada = crear(owner=self.admin, url='https://a.example.com', eventos=['inspeccion.completada'])
+        sellado = crear(owner=self.admin, url='https://b.example.com', eventos=['pdf.listo', 'manifiesto.sellado'])
+        solo_pdf = crear(owner=self.admin, url='https://c.example.com', eventos=['pdf.listo'])
+        ya = crear(owner=self.admin, url='https://d.example.com', eventos=['inspeccion.reabierta'])
+        WebhookDestino.objects.filter(pk=completada.pk).update(ultima_secuencia=7)
+        migracion.suscribir_reabierta(apps, None)
+        eventos = dict(WebhookDestino.objects.values_list('pk', 'eventos'))
+        self.assertEqual(eventos[completada.pk], ['inspeccion.completada', 'inspeccion.reabierta'])
+        self.assertEqual(eventos[sellado.pk], ['pdf.listo', 'manifiesto.sellado', 'inspeccion.reabierta'])
+        self.assertEqual(eventos[solo_pdf.pk], ['pdf.listo'])
+        self.assertEqual(eventos[ya.pk], ['inspeccion.reabierta'])
+        completada.refresh_from_db()
+        self.assertEqual(completada.ultima_secuencia, 7)

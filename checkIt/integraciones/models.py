@@ -104,7 +104,11 @@ EVENTO_INSPECCION_COMPLETADA = 'inspeccion.completada'
 EVENTO_PDF_LISTO = 'pdf.listo'
 # Copia de la raíz sellada fuera de CheckIt: si se rehace o se borra la inspección, se nota
 EVENTO_MANIFIESTO_SELLADO = 'manifiesto.sellado'
-EVENTOS_SALIENTES = (EVENTO_INSPECCION_COMPLETADA, EVENTO_PDF_LISTO, EVENTO_MANIFIESTO_SELLADO)
+# La raíz que el PMS guardó deja de ser la vigente (la sellada queda archivada)
+EVENTO_INSPECCION_REABIERTA = 'inspeccion.reabierta'
+EVENTOS_SALIENTES = (
+    EVENTO_INSPECCION_COMPLETADA, EVENTO_PDF_LISTO, EVENTO_MANIFIESTO_SELLADO, EVENTO_INSPECCION_REABIERTA,
+)
 SECRETO_PREFIX = 'whsec'
 
 

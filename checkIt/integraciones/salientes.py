@@ -25,7 +25,7 @@ from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util import parse_url
 
-from .models import EVENTO_PDF_LISTO, EntregaWebhook, EventoSaliente, WebhookDestino
+from .models import EVENTO_INSPECCION_REABIERTA, EVENTO_PDF_LISTO, EntregaWebhook, EventoSaliente, WebhookDestino
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,10 @@ def firmar(cuerpo, secreto):
     return 'sha256=' + hmac.new(secreto.encode('utf-8'), cuerpo, hashlib.sha256).hexdigest()
 
 
+# Clave de EventoSaliente.datos cuando solo se pudo guardar el `extra` del evento
+_EXTRA = '_extra'
+
+
 def construir_datos(tipo, inspeccion):
     """Bloque `data` del evento, sin el enlace del PDF (se firma al despachar)."""
     propiedad = inspeccion.propiedad
@@ -316,10 +320,11 @@ def _destinos_suscritos(owner_id, tipo, hasta=None):
     return [d for d in destinos.order_by('pk') if tipo in (d.eventos or [])]
 
 
-def registrar_evento(tipo, inspeccion):
+def registrar_evento(tipo, inspeccion, extra=None):
     """
     Guarda el evento en el outbox, en la transacción del cambio que lo origina, y lo
     reparte al confirmar. Sin destinos suscritos no escribe nada. Devuelve el evento.
+    `extra` se añade al bloque `data`: datos del evento que la inspección ya no guarda.
     """
     owner_id = inspeccion.propiedad.owner_id
     if not _destinos_suscritos(owner_id, tipo):
@@ -327,20 +332,45 @@ def registrar_evento(tipo, inspeccion):
     try:
         # Savepoint: un error de BD aquí no debe romper la transacción del cambio
         with transaction.atomic():
-            datos = construir_datos(tipo, inspeccion)
+            # La base manda: `extra` solo añade claves propias del evento
+            datos = {**(extra or {}), **construir_datos(tipo, inspeccion)}
             json.dumps(datos)  # lo que el JSONField no pueda guardar, aquí y no en el INSERT
     except Exception:
-        # Se guarda igual: al despachar se reconstruyen los datos
-        logger.exception("No se pudieron construir los datos del evento %s de la inspección %s", tipo, inspeccion.pk)
-        datos = None
+        # Se guarda igual y al despachar se reconstruye la base.
+        # `extra` no se puede reconstruir: se guarda aparte, marcado
+        logger.exception("No se pudieron construir los datos del evento %s de la inspección %s (extra=%s)",
+                         tipo, inspeccion.pk, extra)
+        datos = _solo_extra(extra)
     evento = EventoSaliente.objects.create(owner_id=owner_id, tipo=tipo, inspeccion=inspeccion, datos=datos)
     # robust: un fallo de este aviso no corta los demás callbacks ni llega a quien confirmó
     transaction.on_commit(lambda pk=evento.pk: despachar_evento(pk), robust=True)
     return evento
 
 
-def emitir_evento(tipo, inspeccion):
-    return registrar_evento(tipo, inspeccion)
+def _solo_extra(extra):
+    if not extra:
+        return None
+    try:
+        json.dumps(extra)
+    except (TypeError, ValueError):
+        return None
+    return {_EXTRA: extra}
+
+
+def _reconstruir_datos(evento):
+    """Datos de un evento guardado sin base: la de ahora más el `extra` guardado."""
+    from inspecciones.models import Inspeccion
+
+    inspeccion = Inspeccion.objects.select_related('propiedad').get(pk=evento.inspeccion_id)
+    base = construir_datos(evento.tipo, inspeccion)
+    if evento.tipo == EVENTO_INSPECCION_REABIERTA:
+        # Al reabrir no hay manifiesto vigente; si se volvió a completar, el de ahora no es el del evento
+        base.pop('manifiesto', None)
+    return {**((evento.datos or {}).get(_EXTRA) or {}), **base}
+
+
+def emitir_evento(tipo, inspeccion, extra=None):
+    return registrar_evento(tipo, inspeccion, extra=extra)
 
 
 def despachar_evento(evento_id):
@@ -361,11 +391,8 @@ def despachar_evento(evento_id):
                 _cerrar_evento(evento.pk, EventoSaliente.Estado.DESCARTADO, 'Inspección borrada antes de despachar.')
                 return []
             datos = evento.datos
-            if datos is None:
-                from inspecciones.models import Inspeccion
-
-                inspeccion = Inspeccion.objects.select_related('propiedad').get(pk=evento.inspeccion_id)
-                datos = construir_datos(evento.tipo, inspeccion)
+            if datos is None or _EXTRA in datos:
+                datos = _reconstruir_datos(evento)
             datos = _con_enlace_pdf(evento.tipo, evento.inspeccion_id, datos)
             entregas = []
             for destino in _destinos_suscritos(evento.owner_id, evento.tipo, hasta=evento.creado):

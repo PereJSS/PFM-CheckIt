@@ -21,9 +21,11 @@ from .models import Inspeccion
 logger = logging.getLogger(__name__)
 
 # Argumentos: inspeccion (recargada de la base de datos tras el UPDATE) y, en
-# manifiesto_sellado, raiz (la que se selló: puede no ser ya la vigente)
+# manifiesto_sellado, raiz (la que se selló: puede no ser ya la vigente).
+# manifiesto_reabierto: raiz (la que deja de valer), sellada y tsa_timestamp (ISO o None)
 pdf_listo = Signal()
 manifiesto_sellado = Signal()
+manifiesto_reabierto = Signal()
 
 
 def anunciar(senal, inspeccion_id, **datos):

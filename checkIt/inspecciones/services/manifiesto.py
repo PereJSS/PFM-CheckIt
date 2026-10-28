@@ -83,25 +83,35 @@ def congelar_manifiesto(inspeccion_id):
 
 
 def reabrir_manifiesto(inspeccion_id):
-    """Al salir de COMPLETADA: archiva el manifiesto sellado (si lo hay) y deja los campos vacíos."""
+    """Al salir de COMPLETADA: archiva el manifiesto sellado (si lo hay), deja los campos
+    vacíos y lo anuncia en la misma transacción."""
+    from ..signals import anunciar, manifiesto_reabierto
+
     with transaction.atomic():
         inspeccion = Inspeccion.objects.select_for_update().filter(pk=inspeccion_id).first()
         if inspeccion is None or not inspeccion.manifiesto_raiz:
             return
         anteriores = list(inspeccion.manifiestos_anteriores or [])
+        ts = inspeccion.manifiesto_tsa_timestamp
+        ts_iso = ts.isoformat() if ts else None
         if inspeccion.manifiesto_tsa_token:
-            ts = inspeccion.manifiesto_tsa_timestamp
             anteriores.append({
                 'manifiesto': inspeccion.manifiesto,
                 'raiz': inspeccion.manifiesto_raiz,
                 'tsa_token': base64.b64encode(bytes(inspeccion.manifiesto_tsa_token)).decode('ascii'),
-                'tsa_timestamp': ts.isoformat() if ts else None,
+                'tsa_timestamp': ts_iso,
                 'tsa_url': inspeccion.manifiesto_tsa_url,
                 'tsa_cualificada': inspeccion.manifiesto_tsa_cualificada,
                 'tsa_verificado': inspeccion.manifiesto_tsa_verificado,
                 'archivado': timezone.now().isoformat(),
             })
         Inspeccion.objects.filter(pk=inspeccion_id).update(manifiestos_anteriores=anteriores, **_CAMPOS_VACIOS)
+        # El PMS que guardó la raíz sabe que ya no vale. También sin sello: la raíz
+        # pudo salir en inspeccion.completada.
+        anunciar(
+            manifiesto_reabierto, inspeccion_id, raiz=inspeccion.manifiesto_raiz,
+            sellada=bool(inspeccion.manifiesto_tsa_token), tsa_timestamp=ts_iso,
+        )
 
 
 def sellar_manifiesto(inspeccion_id):
