@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../services/api";
 import IntegracionesPanel from "../components/integraciones/IntegracionesPanel";
 import { clearAuthTokens } from "../services/authStorage";
@@ -33,6 +33,44 @@ const DESCARGAS = {
   },
 };
 
+// Espera a que el PDF que se está generando esté listo (claim-report-status).
+// Devuelve "LISTO", "ERROR" o null si se agota el tiempo. Si se aborta `signal`
+// (se sale del panel), lanza y corta la petición en curso.
+const ESPERA_PDF_INTERVALO_MS = 3000;
+const ESPERA_PDF_INTENTOS = 20;
+const ESPERA_PDF_FALLOS_SEGUIDOS = 2;
+
+function pausa(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+async function esperarPdf(id, signal) {
+  let fallos = 0;
+  for (let i = 0; i < ESPERA_PDF_INTENTOS; i++) {
+    await pausa(ESPERA_PDF_INTERVALO_MS, signal);
+    try {
+      const { data } = await api.get(`/inspecciones/${id}/claim-report-status/`, { signal });
+      fallos = 0;
+      if (data.pdf_listo) return "LISTO";
+      if (data.estado === "ERROR") return "ERROR";
+    } catch (err) {
+      // Un fallo de red suelto no corta la espera; varios seguidos, sí
+      if (signal.aborted || ++fallos > ESPERA_PDF_FALLOS_SEGUIDOS) throw err;
+    }
+  }
+  return null;
+}
+
 // Valores iniciales para resetear formularios sin repetir objetos literales.
 const FORM_EMPTY = { propiedad: "", operario: "" };
 const PROP_EMPTY = {
@@ -59,6 +97,10 @@ export default function AdminPage() {
   const [operarios, setOperarios] = useState([]);
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(null);
+  // Una descarga a la vez (el state llega tarde para frenar un doble clic) y su
+  // AbortController, que corta la espera del PDF si se sale del panel
+  const descargaEnCurso = useRef(null);
+  useEffect(() => () => descargaEnCurso.current?.abort(), []);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(FORM_EMPTY);
   const [formError, setFormError] = useState(null);
@@ -146,24 +188,33 @@ export default function AdminPage() {
 
   // Solicita al backend el PDF firmado o el paquete probatorio y fuerza descarga en navegador.
   const handleDownload = async (id, tipo) => {
+    if (descargaEnCurso.current) return;
+    const control = new AbortController();
+    descargaEnCurso.current = control;
     const descarga = DESCARGAS[tipo];
     setDownloading(`${tipo}-${id}`);
     try {
-      const response = await api.get(`/inspecciones/${id}/${descarga.ruta}/`, {
-        responseType: "blob",
-      });
-      const blob = response.data;
-      // 202: el PDF aún se está generando y el cuerpo es JSON, no el fichero
+      const pedir = () =>
+        api.get(`/inspecciones/${id}/${descarga.ruta}/`, {
+          responseType: "blob",
+          signal: control.signal,
+        });
+      let response = await pedir();
+      // 202: el PDF aún se está generando y el cuerpo es JSON, no el fichero.
+      // Esperamos a que esté listo y lo pedimos otra vez.
       if (response.status === 202) {
-        let mensaje = "El PDF se está generando.";
-        try {
-          mensaje = JSON.parse(await blob.text()).mensaje || mensaje;
-        } catch {
-          // Mantener mensaje por defecto si no es JSON.
+        const estado = await esperarPdf(id, control.signal);
+        if (estado === "ERROR") {
+          alert("No se pudo generar el PDF. Vuelve a intentarlo para reintentar la generación.");
+          return;
         }
-        alert(`${mensaje} Vuelve a intentarlo en unos segundos.`);
-        return;
+        if (estado === "LISTO") response = await pedir();
+        if (estado !== "LISTO" || response.status === 202) {
+          alert("El PDF sigue generándose. Vuelve a intentarlo en unos segundos.");
+          return;
+        }
       }
+      const blob = response.data;
       const fallbackName = descarga.nombre(id);
       const filename = getDownloadFilename(response.headers, fallbackName);
       const url = window.URL.createObjectURL(blob);
@@ -175,6 +226,8 @@ export default function AdminPage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
+      // Se salió del panel: nada que avisar
+      if (control.signal.aborted) return;
       // Intenta leer el blob de error para mostrar mensaje útil del backend.
       let backendMessage = err.message;
 
@@ -191,7 +244,8 @@ export default function AdminPage() {
 
       alert(`Error al descargar ${descarga.error}: ${backendMessage}`);
     } finally {
-      setDownloading(null);
+      descargaEnCurso.current = null;
+      if (!control.signal.aborted) setDownloading(null);
     }
   };
 
@@ -517,7 +571,7 @@ export default function AdminPage() {
                             <div className="flex flex-wrap gap-2">
                               <button
                                 onClick={() => handleDownload(insp.id, "pdf")}
-                                disabled={downloading === `pdf-${insp.id}`}
+                                disabled={downloading !== null}
                                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 transition"
                               >
                                 {downloading === `pdf-${insp.id}`
@@ -526,7 +580,7 @@ export default function AdminPage() {
                               </button>
                               <button
                                 onClick={() => handleDownload(insp.id, "paquete")}
-                                disabled={downloading === `paquete-${insp.id}`}
+                                disabled={downloading !== null}
                                 title="ZIP con las fotos originales, los sellos de tiempo, el manifiesto y el PDF, verificable sin CheckIt"
                                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white text-blue-700 text-xs font-semibold ring-1 ring-blue-200 hover:bg-blue-50 disabled:opacity-50 transition"
                               >

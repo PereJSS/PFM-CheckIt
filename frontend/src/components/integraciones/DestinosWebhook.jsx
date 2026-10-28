@@ -28,6 +28,7 @@ const EVENTOS_SALIENTES = [
   { valor: "inspeccion.completada", label: "Inspección completada" },
   { valor: "pdf.listo", label: "PDF listo" },
   { valor: "manifiesto.sellado", label: "Manifiesto sellado" },
+  { valor: "inspeccion.reabierta", label: "Inspección reabierta" },
 ];
 
 const DESTINO_EMPTY = {
