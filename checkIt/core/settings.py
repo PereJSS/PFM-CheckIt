@@ -233,6 +233,7 @@ SPECTACULAR_SETTINGS = {
     # Varios modelos tienen un campo `estado` con choices distintos: nombres explícitos
     'ENUM_NAME_OVERRIDES': {
         'EstadoEventoEnum': 'integraciones.models.WebhookEvent.Estado',
+        'PdfEstadoEnum': 'inspecciones.models.Inspeccion.PdfEstado',
     },
 }
 
