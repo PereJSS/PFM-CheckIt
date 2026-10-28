@@ -144,8 +144,8 @@ def _leer_cert_tsa(ruta):
         return f.read()
 
 
-def _validar_cert_fijado(cert_bytes, gen_time):
-    """El certificado fijado debe ser de sellado de tiempo y válido en la hora del sello."""
+def validar_cert_tsa(cert_bytes):
+    """Carga el certificado de la TSA (PEM o DER) y exige EKU timeStamping. Lanza ValueError."""
     if b'-----BEGIN CERTIFICATE-----' in cert_bytes:
         cert = x509.load_pem_x509_certificate(cert_bytes)
     else:
@@ -156,6 +156,12 @@ def _validar_cert_fijado(cert_bytes, gen_time):
         raise ValueError('el certificado de la TSA no tiene EKU timeStamping')
     if ExtendedKeyUsageOID.TIME_STAMPING not in eku:
         raise ValueError('el certificado de la TSA no tiene EKU timeStamping')
+    return cert
+
+
+def _validar_cert_fijado(cert_bytes, gen_time):
+    """El certificado fijado debe ser de sellado de tiempo y válido en la hora del sello."""
+    cert = validar_cert_tsa(cert_bytes)
     if gen_time is None:
         raise ValueError('el token no trae genTime')
     if gen_time.tzinfo is None:
@@ -244,6 +250,15 @@ def solicitar_sello_tiempo(evidencia_hash, perfil=PERFIL_EVIDENCIAS):
     """
     conf = configuracion(perfil)
     try:
+        # Antes de pedir el sello: si no se puede leer, ningún sello pasaría la verificación
+        cert_tsa = _leer_cert_tsa(conf['cert_tsa'])
+    except OSError as e:
+        logger.critical(
+            "TSA mal configurada: no se puede leer el certificado fijado %s (%s); no se sella nada",
+            conf['cert_tsa'], type(e).__name__,
+        )
+        return None
+    try:
         digest, data = _digest_y_datos(evidencia_hash)
         nonce = secrets.randbits(63)
         req = rfc3161ng.make_timestamp_request(
@@ -270,7 +285,6 @@ def solicitar_sello_tiempo(evidencia_hash, perfil=PERFIL_EVIDENCIAS):
         except Exception as parse_err:
             logger.warning("TSA token sin timestamp parseable: %s", parse_err)
 
-        cert_tsa = _leer_cert_tsa(conf['cert_tsa'])
         try:
             # Sin certificado fijado (b''), valida contra el que trae el token
             _comprobar_sello(tst, cert_tsa or b'', digest, nonce, data)

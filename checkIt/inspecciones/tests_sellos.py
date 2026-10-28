@@ -882,3 +882,103 @@ class ClaveFirmaCheckTest(TestCase):
     @override_settings(DEBUG=True)
     def test_sin_aviso_en_desarrollo(self):
         self.assertEqual(self._avisos(), [])
+
+
+class CertTsaCheckTest(TestCase):
+    """Un TSA_CERT mal configurado rechaza todos los sellos en silencio: el deploy debe fallar."""
+
+    def _errores(self):
+        from .checks import check_certificados_tsa
+        return check_certificados_tsa(None)
+
+    def _ids(self, **ajustes):
+        with override_settings(**ajustes):
+            return [e.id for e in self._errores()]
+
+    def test_sin_configurar_no_hay_error(self):
+        self.assertEqual(self._ids(TSA_CERT='', TSA_MANIFIESTO_URL='', TSA_MANIFIESTO_CERT=''), [])
+
+    def test_certificado_valido_no_da_error(self):
+        pem, _ = _crear_tsa_con(dias=(-1, 365))
+        self.assertEqual(self._ids(TSA_CERT=_guardar_pem(self, pem)), [])
+
+    def test_archivo_inexistente(self):
+        with override_settings(TSA_CERT='/etc/secrets/tsa.crt-que-no-existe'):
+            errores = self._errores()
+        self.assertEqual([e.id for e in errores], ['inspecciones.E002'])
+        self.assertIn('TSA_CERT', errores[0].msg)
+
+    def _mensajes(self, **ajustes):
+        with override_settings(**ajustes):
+            return [(e.id, e.msg) for e in self._errores()]
+
+    def test_no_es_un_certificado(self):
+        [(id_, msg)] = self._mensajes(TSA_CERT=_guardar_pem(self, b'no es un certificado'))
+        self.assertEqual(id_, 'inspecciones.E002')
+
+    def test_un_directorio_no_sirve(self):
+        [(id_, msg)] = self._mensajes(TSA_CERT=tempfile.gettempdir())
+        self.assertEqual(id_, 'inspecciones.E002')
+        self.assertIn('no es un archivo', msg)
+
+    def test_sin_eku_timestamping(self):
+        pem, _ = _crear_tsa_con(eku=ExtendedKeyUsageOID.CODE_SIGNING)
+        [(id_, msg)] = self._mensajes(TSA_CERT=_guardar_pem(self, pem))
+        self.assertEqual(id_, 'inspecciones.E002')
+        self.assertIn('EKU', msg)
+
+    def test_caducado(self):
+        pem, _ = _crear_tsa_con(dias=(-30, -1))
+        [(id_, msg)] = self._mensajes(TSA_CERT=_guardar_pem(self, pem))
+        self.assertEqual(id_, 'inspecciones.E002')
+        self.assertIn('caducó', msg)
+
+    def test_avisa_si_caduca_pronto(self):
+        pem, _ = _crear_tsa_con(dias=(-1, 10))
+        [(id_, msg)] = self._mensajes(TSA_CERT=_guardar_pem(self, pem))
+        self.assertEqual(id_, 'inspecciones.W002')
+
+    def test_certificado_der_valido(self):
+        pem, _ = _crear_tsa_con(dias=(-1, 365))
+        der = x509.load_pem_x509_certificate(pem).public_bytes(serialization.Encoding.DER)
+        self.assertEqual(self._ids(TSA_CERT=_guardar_pem(self, der)), [])
+
+    def test_error_inesperado_no_tumba_manage_py(self):
+        with patch('inspecciones.checks.validar_cert_tsa', side_effect=TypeError('raro')):
+            [(id_, msg)] = self._mensajes(TSA_CERT=_guardar_pem(self, b'x'))
+        self.assertEqual(id_, 'inspecciones.E002')
+        self.assertIn('TypeError', msg)
+
+    def test_mtls_sin_archivo(self):
+        self.assertEqual(self._ids(TSA_CERT_CLIENTE='/no/existe.pem'), ['inspecciones.E002'])
+        self.assertEqual(
+            self._ids(TSA_CERT_CLIENTE=_guardar_pem(self, b'x'), TSA_CLAVE_CLIENTE='/no/existe.key'),
+            ['inspecciones.E002'],
+        )
+
+    def test_perfil_manifiesto_solo_si_tiene_url_propia(self):
+        roto = '/no/existe.crt'
+        self.assertEqual(self._ids(TSA_MANIFIESTO_URL='', TSA_MANIFIESTO_CERT=roto), [])
+        self.assertEqual(
+            self._ids(TSA_MANIFIESTO_URL='https://qtsp.example/tsr', TSA_MANIFIESTO_CERT=roto),
+            ['inspecciones.E002'],
+        )
+        pem, _ = _crear_tsa_con(dias=(-1, 365))
+        self.assertEqual(
+            self._ids(TSA_MANIFIESTO_URL='https://qtsp.example/tsr', TSA_MANIFIESTO_CERT=_guardar_pem(self, pem)),
+            [],
+        )
+
+    def test_en_ejecucion_un_certificado_ilegible_es_critico_y_no_llama_a_la_tsa(self):
+        from .services.tsa import solicitar_sello_tiempo
+        with override_settings(TSA_CERT='/no/existe.crt'), \
+                patch('inspecciones.services.tsa.requests.post') as post, \
+                self.assertLogs('inspecciones.services.tsa', level='CRITICAL'):
+            self.assertIsNone(solicitar_sello_tiempo(HASH_A))
+        post.assert_not_called()
+
+    def test_el_check_esta_registrado(self):
+        from django.core import checks
+        with override_settings(TSA_CERT='/no/existe.crt'):
+            ids = [e.id for e in checks.run_checks()]
+        self.assertIn('inspecciones.E002', ids)
