@@ -1726,3 +1726,50 @@ class MigracionSuscribirReabiertaTest(BaseIntegracionTest):
         self.assertEqual(eventos[ya.pk], ['inspeccion.reabierta'])
         completada.refresh_from_db()
         self.assertEqual(completada.ultima_secuencia, 7)
+
+
+@patch('integraciones.tasks.entregar_webhook.apply_async')
+class RaizAnteriorTest(BaseSalientesTest):
+    """El bloque manifiesto dice qué raíz sellada sustituye la vigente."""
+
+    _sellar = ReaperturaTest._sellar
+    _reabrir = ReaperturaTest._reabrir
+
+    def _manifiesto(self, evento='inspeccion.completada'):
+        return EntregaWebhook.objects.filter(evento=evento).order_by('-pk').first().payload['data']['manifiesto']
+
+    def test_primera_vez_sin_raiz_anterior(self, mock_encolar):
+        self._completar()
+        self.assertIsNone(self._manifiesto()['raiz_anterior'])
+
+    def test_tras_reabrir_lleva_la_raiz_sellada_archivada(self, mock_encolar):
+        self._completar()
+        self._sellar()
+        self.inspeccion.refresh_from_db()
+        sellada = self.inspeccion.manifiesto_raiz
+        self._reabrir()
+        # Como una petición nueva: la instancia de la reapertura no tiene lo que archivó el UPDATE
+        self.inspeccion.refresh_from_db()
+        self._completar()
+        self.assertEqual(self._manifiesto()['raiz_anterior'], sellada)
+
+    def test_archivo_corrupto_no_tumba_el_webhook(self, mock_encolar):
+        for corrupto in (['no', 'dict'], [{'raiz': {'x': 1}}], [{'sin': 'raiz'}], [{'raiz': '<script>'}]):
+            with self.subTest(corrupto=corrupto):
+                EntregaWebhook.objects.all().delete()
+                Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+                    estado=Inspeccion.Estado.EN_PROGRESO, manifiestos_anteriores=corrupto,
+                    manifiesto=None, manifiesto_raiz=None,
+                )
+                self.inspeccion.refresh_from_db()
+                with self.assertLogs('integraciones.salientes', level='WARNING'):
+                    self._completar()
+                self.assertIsNone(self._manifiesto()['raiz_anterior'])
+
+    def test_con_varias_reaperturas_toma_la_ultima(self, mock_encolar):
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            manifiestos_anteriores=[{'raiz': 'aa' * 32}, {'raiz': 'bb' * 32}],
+        )
+        self.inspeccion.refresh_from_db()
+        self._completar()
+        self.assertEqual(self._manifiesto()['raiz_anterior'], 'bb' * 32)

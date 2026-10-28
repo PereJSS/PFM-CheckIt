@@ -11,6 +11,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import re
 import socket
 import uuid
 from datetime import timedelta
@@ -206,6 +207,7 @@ def firmar(cuerpo, secreto):
     return 'sha256=' + hmac.new(secreto.encode('utf-8'), cuerpo, hashlib.sha256).hexdigest()
 
 
+_RAIZ_HEX = re.compile(r'[0-9a-f]{64}')
 # Clave de EventoSaliente.datos cuando solo se pudo guardar el `extra` del evento
 _EXTRA = '_extra'
 
@@ -277,6 +279,7 @@ def _testigo_manifiesto(inspeccion_id):
     fila = Inspeccion.objects.filter(pk=inspeccion_id).values(
         'manifiesto', 'manifiesto_raiz', 'manifiesto_tsa_token', 'manifiesto_tsa_timestamp',
         'manifiesto_tsa_url', 'manifiesto_tsa_cualificada', 'manifiesto_tsa_verificado',
+        'manifiestos_anteriores',
     ).first()
     if not fila or not fila['manifiesto_raiz']:
         return None
@@ -293,7 +296,21 @@ def _testigo_manifiesto(inspeccion_id):
         'tsa_url': fila['manifiesto_tsa_url'] or None,
         'tsa_cualificada': fila['manifiesto_tsa_cualificada'],
         'tsa_verificado': fila['manifiesto_tsa_verificado'],
+        'raiz_anterior': _raiz_anterior(inspeccion_id, fila['manifiestos_anteriores']),
     }
+
+
+def _raiz_anterior(inspeccion_id, anteriores):
+    """Última raíz sellada archivada al reabrir (las no selladas no se archivan)."""
+    if not anteriores:
+        return None
+    ultima = anteriores[-1] if isinstance(anteriores, list) else None
+    raiz = ultima.get('raiz') if isinstance(ultima, dict) else None
+    # Solo un hash: lo que no lo sea no sale en un payload firmado
+    if isinstance(raiz, str) and _RAIZ_HEX.fullmatch(raiz):
+        return raiz
+    logger.warning("Archivo de manifiestos de la inspección %s sin una raíz válida al final", inspeccion_id)
+    return None
 
 
 # --- Emisión ---
