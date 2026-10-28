@@ -186,6 +186,9 @@ El proyecto usa python-decouple. Variables disponibles:
 | `WEBHOOK_SALIENTE_MAX_DESTINOS` | No | Máximo de destinos activos por administrador (por defecto `10`) |
 | `WEBHOOK_SALIENTE_PERMITIR_LOCAL` | No | **Solo desarrollo.** Permite `http` y destinos locales o privados, desactivando la protección SSRF (por defecto `False`). Con `DEBUG=False` el arranque avisa (`integraciones.W001`) |
 | `WEBHOOK_ENTREGAS_RETENCION_DIAS` | No | Días que se conservan las entregas cerradas (entregadas o fallidas) antes de la purga diaria vía Celery beat (por defecto `90`) |
+| `WEBHOOK_SALIENTE_GRACIA_SEG` | No | Segundos que el barrido del outbox deja a un evento recién registrado antes de despacharlo él (el despacho normal es al confirmar la transacción; por defecto `120`) |
+| `WEBHOOK_SALIENTE_VENTANA_HORAS` | No | Horas tras las que un evento del outbox que no se pudo despachar se descarta con un error en el log (por defecto `48`). Si el servicio está parado más tiempo, esos eventos no se envían |
+| `WEBHOOK_SALIENTE_MAX_INTENTOS_DESPACHO` | No | Intentos de despacho de un evento del outbox antes de descartarlo (por defecto `5`). Un fallo con la base de datos caída no gasta intentos |
 | `BACKEND_PUBLIC_URL` | No | URL pública del backend, base de los enlaces absolutos de los webhooks como `pdf_url` (por defecto `https://pfm-checkit.onrender.com`) |
 | `PDF_URL_CADUCIDAD_HORAS` | No | Validez en horas del enlace firmado de descarga del PDF que lleva el webhook `pdf.listo` (por defecto `72`) |
 | `PDF_GENERANDO_CADUCA_MIN` | No | Minutos tras los que un PDF que sigue en `GENERANDO` se da por perdido (worker muerto) y `claim-report` lo vuelve a encolar (por defecto `15`) |
@@ -370,26 +373,32 @@ Cada admin puede registrar destinos (`/integraciones/destinos/`, o desde la pest
 - `inspeccion.completada`: la inspección pasa a `COMPLETADA`.
 - `pdf.listo`: el PDF firmado pasa a `LISTO`. Lleva `pdf_url` (enlace firmado con caducidad, `pdf_url_caduca`) y `pdf_manifiesto_raiz`, la raíz que describe ese PDF.
 - `manifiesto.sellado`: la TSA sella la raíz del manifiesto Merkle (al completar, o más tarde en el re-sellado periódico si la TSA estaba caída).
+- `inspeccion.reabierta`: una inspección completada se reabre y su raíz deja de ser la vigente. Lleva el bloque `reapertura` con `raiz` (la que deja de valer), `sellada` y `tsa_timestamp`; no lleva `manifiesto`, porque al reabrir no hay ninguno vigente. Se emite también si la raíz no llegó a sellarse, porque pudo salir ya en `inspeccion.completada`.
 
-Los eventos se emiten solo en la transición (señales sobre `Inspeccion`, y señales propias `pdf_listo`/`manifiesto_sellado` para lo que se guarda con UPDATE condicional) y se encolan tras el commit. Los destinos nuevos se suscriben a todos los eventos; los ya creados conservan su lista y hay que añadirles `manifiesto.sellado` a mano. Payload:
+Los eventos se emiten solo en la transición (señales sobre `Inspeccion`, y señales propias `pdf_listo`, `manifiesto_sellado` y `manifiesto_reabierto` para lo que se guarda con UPDATE). Los destinos nuevos se suscriben a todos los eventos; los ya creados conservan su lista (la migración `integraciones` 0005 añadió `inspeccion.reabierta` a los que reciben la raíz).
+
+**Outbox.** Cada evento se guarda en la tabla `EventoSaliente` dentro de la misma transacción que el cambio que lo origina, y se reparte (una entrega por destino) al confirmarse. Si el proceso muere entre medias, el evento sigue `PENDIENTE` y lo despacha el barrido periódico (`despachar_eventos_salientes`, cada 5 min) pasados `WEBHOOK_SALIENTE_GRACIA_SEG`. Un evento que no se puede despachar en `WEBHOOK_SALIENTE_VENTANA_HORAS`, o tras `WEBHOOK_SALIENTE_MAX_INTENTOS_DESPACHO` intentos, se descarta con un error en el log. Un destino creado después del evento no lo recibe.
+
+Payload:
 
 ```json
-{"event_id": "…", "tipo": "manifiesto.sellado", "fecha": "…",
+{"event_id": "…", "tipo": "manifiesto.sellado", "fecha": "…", "ocurrido": "…", "secuencia": 42,
  "data": {"inspeccion_id": 1, "propiedad_id": 2, "external_id": "LISTING-42", "estado": "COMPLETADA", "pdf_estado": "PENDIENTE",
           "manifiesto": {"raiz": "9f86…", "hojas": 12, "tsa_token": "MIIE…", "tsa_timestamp": "2026-10-22T09:15:03+00:00",
-                         "tsa_url": "https://freetsa.org/tsr", "tsa_cualificada": false, "tsa_verificado": true}}}
+                         "tsa_url": "https://freetsa.org/tsr", "tsa_cualificada": false, "tsa_verificado": true,
+                         "raiz_anterior": null}}}
 ```
 
 **Testigo externo de la raíz.** El bloque `manifiesto` va en todos los eventos desde que la inspección se completa (`tsa_*` en `null` hasta que se sella). Así el PMS guarda una copia de la raíz fuera del control de CheckIt. Para que sirva de testigo, el receptor debe:
 
-- **Conservar la primera raíz** de cada `inspeccion_id` y alertar si después llega otra distinta. Una reapertura legítima también cambia la raíz, así que una raíz nueva no prueba manipulación, pero sí obliga a CheckIt a explicarla (las anteriores quedan en `manifiestos_anteriores`).
+- **Conservar la primera raíz** de cada `inspeccion_id` y alertar si después llega otra distinta. Una reapertura legítima también cambia la raíz: llega antes un `inspeccion.reabierta` con la raíz que deja de valer, y la nueva trae en `raiz_anterior` la última raíz **sellada** archivada (las no selladas no se archivan, así que no es necesariamente la inmediatamente anterior). Una raíz que cambia sin ese aviso obliga a CheckIt a explicarla (las anteriores quedan en `manifiestos_anteriores` y en el paquete probatorio).
 - **Verificar el sello por su cuenta** con `tsa_token` (token RFC 3161 en base64) y el certificado de la TSA: `openssl ts -verify -digest <raiz> -in token.tst -CAfile tsa.pem`. `tsa_timestamp`, `tsa_cualificada` y `tsa_verificado` son lo que declara CheckIt, solo informativos.
-- Tener en cuenta que la entrega es *at-least-once* pero no garantizada: un destino caído o desactivado, o una entrega `FALLIDA`, deja huecos que el PMS no ve. Las entregas se purgan pasado un tiempo.
+- **Detectar huecos con `secuencia`**: cada destino numera sus entregas 1, 2, 3… Si después de la 41 llega la 43, la 42 no llegó (p. ej. quedó `FALLIDA`) y se puede reintentar desde el panel. Los reintentos de una entrega conservan su número, así que un número repetido es un duplicado. Un destino desactivado no recibe ni numera eventos mientras lo está. Las entregas se purgan pasado un tiempo.
 
-Cabeceras: `X-CheckIt-Signature: sha256=<hex>` (HMAC-SHA256 del cuerpo crudo con el secreto `whsec_…`), `X-CheckIt-Event` y `X-CheckIt-Delivery` (estable entre reintentos). El receptor debe verificar la firma con comparación en tiempo constante, rechazar `fecha` antiguas y **deduplicar por `X-CheckIt-Delivery`**: la entrega es *at-least-once*.
+Cabeceras: `X-CheckIt-Signature: sha256=<hex>` (HMAC-SHA256 del cuerpo crudo con el secreto `whsec_…`), `X-CheckIt-Event` y `X-CheckIt-Delivery` (estable entre reintentos). El receptor debe verificar la firma con comparación en tiempo constante, rechazar `fecha` antiguas y **deduplicar por `X-CheckIt-Delivery`**: la entrega es *at-least-once*. `fecha` es la hora en que el evento se reparte a los destinos (los reintentos reenvían el mismo cuerpo firmado, con la misma `fecha`); `ocurrido`, la del cambio que lo originó, que es la que sirve para ordenar. Si el receptor rechaza `fecha` antiguas, que la ventana cubra los reintentos (backoff de hasta ~16 min) o los reintentos manuales que quiera aceptar.
 
 - **Reintentos**: ante 5xx o error de red, backoff exponencial (`30·2^n` s, hasta 5). Un 4xx o 3xx deja la entrega `FALLIDA` sin reintentar; no se siguen redirecciones.
-- **Recuperación**: Celery beat ejecuta cada 5 min `reencolar_entregas_atascadas` (entregas `PENDIENTE` sin actividad >10 min, p. ej. con el broker caído). También se pueden reintentar a mano.
+- **Recuperación**: Celery beat ejecuta cada 5 min `reencolar_entregas_atascadas` (entregas `PENDIENTE` sin actividad >10 min, p. ej. con el broker caído) y `despachar_eventos_salientes` (eventos del outbox sin repartir). También se pueden reintentar a mano.
 - **Protección SSRF**: solo `https`; se rechazan userinfo, `\`, URLs ambiguas y hosts que resuelvan a IPs privadas, loopback, link-local, metadatos de nube o rangos de transición IPv6. La IP se valida en el momento de conectar y la conexión se fija a esa IP (con SNI y certificado del hostname original), sin proxies del entorno. Depende de `requests==2.32.4` y `urllib3==2.2.3`: revisar `integraciones/salientes.py` antes de actualizarlas.
 ---
 
