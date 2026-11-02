@@ -18,6 +18,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from django.db import DatabaseError, transaction
 from django.test import TestCase, override_settings
 from pyhanko.sign.timestamps.dummy_client import DummyTimeStamper
 from rest_framework import status
@@ -982,3 +983,119 @@ class CertTsaCheckTest(TestCase):
         with override_settings(TSA_CERT='/no/existe.crt'):
             ids = [e.id for e in checks.run_checks()]
         self.assertIn('inspecciones.E002', ids)
+
+
+class InstanciaObsoletaTest(_ConInspeccion, TestCase):
+    """congelar y reabrir (y el worker del sello) escriben con UPDATE: una instancia
+    en memoria no debe deshacerlo al guardarse otra vez."""
+
+    def setUp(self):
+        self._crear_inspeccion()
+        self._evidencia(HASH_A)
+        self.raiz = merkle.raiz([bytes.fromhex(HASH_A)]).hex()
+
+    def _guardar_estado(self, estado):
+        self.inspeccion.estado = estado
+        self.inspeccion.save()
+
+    def _completar_y_sellar(self):
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        self._sellar()
+
+    def _sellar(self):
+        from .services.manifiesto import sellar_manifiesto
+        with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=_sello()):
+            self.assertTrue(sellar_manifiesto(self.inspeccion.pk))
+
+    def _en_bd(self):
+        return Inspeccion.objects.get(pk=self.inspeccion.pk)
+
+    def test_al_completar_la_instancia_ve_la_raiz_congelada(self):
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        self.assertEqual(self.inspeccion.manifiesto_raiz, self.raiz)
+        self.assertEqual(self.inspeccion.manifiesto['raiz'], self.raiz)
+
+    def test_al_reabrir_la_instancia_ve_el_archivo_y_los_campos_vacios(self):
+        self._completar_y_sellar()
+        self.inspeccion.refresh_from_db()
+        self._guardar_estado(Inspeccion.Estado.EN_PROGRESO)
+        self.assertIsNone(self.inspeccion.manifiesto_raiz)
+        self.assertIsNone(self.inspeccion.manifiesto_tsa_token)
+        self.assertEqual(len(self.inspeccion.manifiestos_anteriores), 1)
+        self.assertEqual(self.inspeccion.pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
+
+    def test_segundo_save_tras_reabrir_no_pisa_el_archivo(self):
+        self._completar_y_sellar()
+        self.inspeccion.refresh_from_db()
+        self._guardar_estado(Inspeccion.Estado.EN_PROGRESO)
+        self.inspeccion.save()
+        guardada = self._en_bd()
+        self.assertIsNone(guardada.manifiesto_raiz)
+        self.assertEqual(len(guardada.manifiestos_anteriores), 1)
+
+    def test_reabrir_y_completar_con_la_misma_instancia_conserva_archivo_y_raiz_nueva(self):
+        self._completar_y_sellar()
+        self.inspeccion.refresh_from_db()
+        self._guardar_estado(Inspeccion.Estado.EN_PROGRESO)
+        self._evidencia(HASH_B)
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        guardada = self._en_bd()
+        self.assertEqual(guardada.manifiesto_raiz, merkle.raiz([bytes.fromhex(HASH_A), bytes.fromhex(HASH_B)]).hex())
+        self.assertEqual([a['raiz'] for a in guardada.manifiestos_anteriores], [self.raiz])
+
+    def test_segundo_save_tras_reabrir_no_devuelve_el_pdf_a_listo(self):
+        self._completar_y_sellar()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(pdf_estado=Inspeccion.PdfEstado.LISTO)
+        self.inspeccion.refresh_from_db()
+        self._guardar_estado(Inspeccion.Estado.EN_PROGRESO)
+        self.inspeccion.save()
+        self.assertEqual(self._en_bd().pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
+
+    def test_recompletar_con_la_misma_instancia_no_emite_pdf_listo(self):
+        self._completar_y_sellar()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(pdf_estado=Inspeccion.PdfEstado.LISTO)
+        self.inspeccion.refresh_from_db()
+        self._guardar_estado(Inspeccion.Estado.EN_PROGRESO)
+        with patch('integraciones.signals._emitir') as emitir:
+            self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        self.assertNotIn('pdf.listo', [llamada.args[0] for llamada in emitir.call_args_list])
+
+    def test_save_de_una_instancia_leida_antes_del_sello_no_borra_el_token(self):
+        # La carrera real: el PATCH lee la fila, el worker sella y el PATCH guarda
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        leida = self._en_bd()
+        self._sellar()
+        leida.save()
+        self.assertEqual(bytes(self._en_bd().manifiesto_tsa_token), b'token-manifiesto')
+
+    def test_reabrir_con_una_instancia_leida_antes_del_sello_archiva_el_sello(self):
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        leida = self._en_bd()
+        self._sellar()
+        leida.estado = Inspeccion.Estado.EN_PROGRESO
+        leida.save()
+        self.assertEqual([a['raiz'] for a in self._en_bd().manifiestos_anteriores], [self.raiz])
+
+    def test_save_con_update_fields_explicito_escribe_el_manifiesto(self):
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        self.inspeccion.manifiesto_raiz = 'f' * 64
+        self.inspeccion.save(update_fields=['manifiesto_raiz'])
+        self.assertEqual(self._en_bd().manifiesto_raiz, 'f' * 64)
+
+    def test_save_con_argumentos_posicionales_respeta_update_fields(self):
+        self._guardar_estado(Inspeccion.Estado.COMPLETADA)
+        self.inspeccion.manifiesto_raiz = 'f' * 64
+        self.inspeccion.save(False, False, None, ['manifiesto_raiz'])
+        self.assertEqual(self._en_bd().manifiesto_raiz, 'f' * 64)
+
+    def test_save_de_una_fila_borrada_falla_y_no_la_resucita(self):
+        leida = self._en_bd()
+        Inspeccion.objects.filter(pk=leida.pk).delete()
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            leida.save()
+        self.assertFalse(Inspeccion.objects.filter(pk=leida.pk).exists())
+
+    def test_todo_campo_del_manifiesto_esta_clasificado(self):
+        # Un campo nuevo del manifiesto debe decidir si lo protege save()
+        campos = {f.name for f in Inspeccion._meta.concrete_fields if f.name.startswith('manifiesto')}
+        self.assertEqual(campos, set(Inspeccion.CAMPOS_SOLO_UPDATE))

@@ -41,6 +41,10 @@ _CAMPOS_VACIOS = {
     'pdf_estado': Inspeccion.PdfEstado.PENDIENTE,
 }
 
+# Lo que escribe cada UPDATE: el post_save refresca estos campos en la instancia
+CAMPOS_AL_CONGELAR = ('manifiesto', 'manifiesto_raiz')
+CAMPOS_AL_REABRIR = (*_CAMPOS_VACIOS, 'manifiestos_anteriores')
+
 
 def construir_manifiesto(inspeccion):
     """Manifiesto canónico: hojas ordenadas por id de evidencia y raíz RFC 6962 en hex."""

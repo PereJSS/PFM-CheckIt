@@ -5,6 +5,13 @@ from propiedades.models import Propiedad
 from django.conf import settings
 
 class Inspeccion(models.Model):
+    # Los escribe solo services/manifiesto.py, con UPDATE: save() completo no los toca
+    CAMPOS_SOLO_UPDATE = frozenset({
+        'manifiesto', 'manifiesto_raiz', 'manifiesto_tsa_token', 'manifiesto_tsa_timestamp',
+        'manifiesto_tsa_url', 'manifiesto_tsa_cualificada', 'manifiesto_tsa_verificado',
+        'manifiesto_tsa_ultimo_intento', 'manifiestos_anteriores',
+    })
+
     class Estado(models.TextChoices):
         PENDIENTE = 'PENDIENTE', 'Pendiente'
         EN_PROGRESO = 'EN_PROGRESO', 'En progreso'
@@ -50,6 +57,16 @@ class Inspeccion(models.Model):
                 condition=models.Q(estado='COMPLETADA', manifiesto_tsa_token__isnull=True),
             ),
         ]
+
+    def save(self, force_insert=False, force_update=False, using=None, update_fields=None):
+        # Un save() completo con una instancia leída antes del sello borraría el token.
+        # Solo protege el manifiesto: pdf_* aún se escribe aquí con el valor de la instancia.
+        if not self._state.adding and update_fields is None and not force_insert:
+            update_fields = [
+                f.name for f in self._meta.concrete_fields
+                if not f.primary_key and f.name not in self.CAMPOS_SOLO_UPDATE
+            ]
+        super().save(force_insert=force_insert, force_update=force_update, using=using, update_fields=update_fields)
 
     def __str__(self) -> str:
         return f"Inspección {self.pk} - {self.propiedad.nombre} asignada a {self.operario.username if self.operario else 'Sin operario'} - Estado: {self.estado_display()}"

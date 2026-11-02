@@ -69,15 +69,18 @@ def encolar_sellado_manifiesto(sender, instance, created=False, raw=False, **kwa
 
     if instance.estado != completada:
         if anterior == completada:
-            from .services.manifiesto import reabrir_manifiesto
+            from .services.manifiesto import CAMPOS_AL_REABRIR, reabrir_manifiesto
             reabrir_manifiesto(instance.pk)
+            # El UPDATE no toca esta instancia: guardarla otra vez desharía la reapertura
+            instance.refresh_from_db(fields=CAMPOS_AL_REABRIR)
         return
     if not created and anterior in (None, completada):
         return
 
-    from .services.manifiesto import congelar_manifiesto
+    from .services.manifiesto import CAMPOS_AL_CONGELAR, congelar_manifiesto
     congelar_manifiesto(instance.pk)
     transaction.on_commit(lambda pk=instance.pk: _encolar(pk))
+    instance.refresh_from_db(fields=CAMPOS_AL_CONGELAR)
 
 
 def _encolar(inspeccion_id):
