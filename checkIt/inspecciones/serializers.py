@@ -17,6 +17,8 @@ class InspeccionSerializer(serializers.ModelSerializer):
         model = Inspeccion
         # El manifiesto completo y los tokens van en el PDF y en el paquete probatorio, no en cada listado
         exclude = ('manifiesto', 'manifiesto_tsa_token', 'manifiesto_tsa_ultimo_intento', 'manifiestos_anteriores')
+        # Solo los escribe el servidor: claim-report abre lo que diga pdf_ruta
+        read_only_fields = ('pdf_estado', 'pdf_ruta')
 
     def get_operario_nombre(self, obj):
         if obj.operario:

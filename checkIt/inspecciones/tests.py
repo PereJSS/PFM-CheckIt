@@ -1084,3 +1084,66 @@ class GenerarPdfReintentoTest(TestCase):
         generar_pdf_async.apply(args=[self.insp.pk])
         mock_base.assert_not_called()
         self.assertEqual(self._estado(), Inspeccion.PdfEstado.LISTO)
+
+
+class CamposPdfSoloLecturaTest(APITestCase):
+    """pdf_ruta y pdf_estado solo los escribe el servidor: con pdf_ruta escribible, un
+    administrador abría por claim-report cualquier archivo del storage, también de otro cliente."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username='admin_a', password='Pass1234!', role=User.Role.ADMIN)
+        self.otro = User.objects.create_user(username='admin_b', password='Pass1234!', role=User.Role.ADMIN)
+        self.operario = User.objects.create_user(username='op_a', password='Pass1234!', role=User.Role.OPERARIO)
+        self.propiedad = Propiedad.objects.create(owner=self.admin, nombre='A', direccion='C')
+        self.insp = Inspeccion.objects.create(propiedad=self.propiedad, operario=self.operario)
+        self.ajena = Inspeccion.objects.create(propiedad=Propiedad.objects.create(owner=self.otro, nombre='B', direccion='C'))
+        self.client.force_authenticate(user=self.admin)
+
+    def _patch(self, datos):
+        return self.client.patch(f'/api/v1/inspecciones/{self.insp.pk}/', datos, format='json')
+
+    def _claim_report(self):
+        return self.client.get(f'/api/v1/inspecciones/{self.insp.pk}/claim-report/')
+
+    def test_patch_no_escribe_pdf_ruta_ni_pdf_estado(self):
+        response = self._patch({'pdf_ruta': 'informes/ajeno.pdf', 'pdf_estado': Inspeccion.PdfEstado.LISTO})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.insp.refresh_from_db()
+        self.assertIsNone(self.insp.pdf_ruta)
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
+
+    def test_post_no_escribe_pdf_ruta_ni_pdf_estado(self):
+        response = self.client.post('/api/v1/inspecciones/', {
+            'propiedad': self.propiedad.pk, 'operario': self.operario.pk,
+            'pdf_ruta': 'informes/ajeno.pdf', 'pdf_estado': Inspeccion.PdfEstado.LISTO,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.content)
+        creada = Inspeccion.objects.get(pk=response.data['id'])
+        self.assertIsNone(creada.pdf_ruta)
+        self.assertEqual(creada.pdf_estado, Inspeccion.PdfEstado.PENDIENTE)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_no_descarga_el_pdf_de_otro_cliente(self, mock_task):
+        mock_task.delay.return_value = MagicMock(id='t')
+        ruta = default_storage.save(f'informes/Reclamacion_Fianza_{self.ajena.pk}_Firmada.pdf', ContentFile(b'%PDF-ajeno'))
+        self._patch({'pdf_ruta': ruta, 'pdf_estado': Inspeccion.PdfEstado.LISTO})
+        response = self._claim_report()
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+    @patch('inspecciones.tasks.generar_pdf_async')
+    def test_no_descarga_la_foto_de_otro_cliente(self, mock_task):
+        mock_task.delay.return_value = MagicMock(id='t')
+        foto = Evidencia.objects.create(inspeccion=self.ajena, foto=_make_image(), hash_sha256='a' * 64).foto.name
+        self._patch({'pdf_ruta': foto, 'pdf_estado': Inspeccion.PdfEstado.LISTO})
+        response = self._claim_report()
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+    def test_patch_no_emite_un_pdf_listo_falso(self):
+        with patch('integraciones.signals._emitir') as emitir:
+            response = self._patch({'pdf_estado': Inspeccion.PdfEstado.LISTO})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emitir.assert_not_called()
+
+    def test_la_respuesta_sigue_mostrando_pdf_estado(self):
+        response = self.client.get(f'/api/v1/inspecciones/{self.insp.pk}/')
+        self.assertEqual(response.data['pdf_estado'], Inspeccion.PdfEstado.PENDIENTE)
