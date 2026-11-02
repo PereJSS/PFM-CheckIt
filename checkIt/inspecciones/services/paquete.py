@@ -236,6 +236,7 @@ def _expediente(inspeccion, fichas, anteriores, certificados, avisos):
             'direccion': inspeccion.propiedad.direccion,
             'operario': (operario.get_full_name() or operario.username) if operario else None,
             'fecha_creacion': _iso(inspeccion.fecha_creacion),
+            'clave_verificacion': inspeccion.clave_verificacion,
         },
         'informe': 'informe_firmado.pdf',
         'manifiesto': {

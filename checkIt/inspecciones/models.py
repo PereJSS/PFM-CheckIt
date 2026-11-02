@@ -1,8 +1,14 @@
+import secrets
+
 from django.db import models
 
 # Create your models here.
 from propiedades.models import Propiedad
 from django.conf import settings
+
+def generar_clave_verificacion():
+    return secrets.token_hex(32)
+
 
 class Inspeccion(models.Model):
     # Los escribe solo services/manifiesto.py, con UPDATE: save() completo no los toca
@@ -48,6 +54,9 @@ class Inspeccion(models.Model):
     manifiesto_tsa_ultimo_intento = models.DateTimeField(blank=True, null=True, editable=False)
     # Manifiestos sellados de completados anteriores (si se reabrió la inspección): tienen valor probatorio
     manifiestos_anteriores = models.JSONField(default=list, blank=True, editable=False)
+    # Llave del verificador público. Es aleatoria y no sale de las fotos, a diferencia de la raíz,
+    # que se calcula con ellas: sin ella, tener una foto no enseña nada. Llega con el acta.
+    clave_verificacion = models.CharField(max_length=64, unique=True, default=generar_clave_verificacion, editable=False)
 
     class Meta:
         indexes = [
@@ -103,6 +112,8 @@ class Evidencia(models.Model):
 
     class Meta:
         indexes = [
+            # El verificador público busca por hash
+            models.Index(fields=['hash_sha256'], name='evidencia_hash_idx'),
             # Solo las pendientes de sello: el índice no crece con las ya selladas
             models.Index(
                 fields=['tsa_ultimo_intento', 'id'],

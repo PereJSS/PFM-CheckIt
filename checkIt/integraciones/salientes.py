@@ -221,6 +221,7 @@ def construir_datos(tipo, inspeccion):
         'external_id': propiedad.external_id,
         'estado': inspeccion.estado,
         'pdf_estado': inspeccion.pdf_estado,
+        'clave_verificacion': inspeccion.clave_verificacion,
     }
     manifiesto = _testigo_manifiesto(inspeccion.pk)
     if manifiesto:

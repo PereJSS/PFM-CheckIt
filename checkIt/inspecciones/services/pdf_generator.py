@@ -137,13 +137,15 @@ def _seccion_manifiesto(inspeccion, s):
         ['Evidencias incluidas', str(num_hojas)],
         ['Raíz SHA-256', Paragraph(inspeccion.manifiesto_raiz, s['small'])],
         ['Sello RFC 3161', Paragraph(sello, s['small'])],
+        ['Clave de verificación', Paragraph(inspeccion.clave_verificacion, s['small'])],
     ]
     flowables.append(_kv_table(filas, col_widths=[4.5 * cm, PAGE_W - 2 * MARGIN - 4.5 * cm]))
     flowables.append(Spacer(1, 0.2 * cm))
     flowables.append(Paragraph(
         'La raíz resume los hashes de todas las evidencias en el orden en que se registraron: '
         'cambiar, añadir o quitar una foto cambia la raíz. Cada foto se puede comprobar por '
-        'separado con su prueba de inclusión.',
+        'separado con su prueba de inclusión, que se obtiene con la foto y la clave de verificación: '
+        'quien tenga este informe y la foto puede consultarla.',
         s['small'],
     ))
     return flowables

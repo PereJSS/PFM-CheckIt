@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .pdf_publico import InformePdfPublicoView
+from .verificacion_publica import VerificacionPublicaView
 from .views import InspeccionViewSet, EvidenceAuditView, EvidenceTokenView
 
 
@@ -12,4 +13,5 @@ urlpatterns = [
     path('audit/<int:id>/', EvidenceAuditView.as_view(), name='evidence-audit'),
     path('audit/<int:id>/token/', EvidenceTokenView.as_view(), name='evidence-token'),
     path('informes/<str:token>/', InformePdfPublicoView.as_view(), name='informe-pdf-publico'),
+    path('verificacion/<str:clave>/<str:sha256>/', VerificacionPublicaView.as_view(), name='verificacion-publica'),
 ]
