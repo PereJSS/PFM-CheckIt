@@ -1,6 +1,24 @@
 
 
+from django.test import SimpleTestCase
+from kombu import Connection
+from kombu.exceptions import OperationalError
 from rest_framework.test import APITestCase as _APITestCase
+
+
+class BrokerRedisTest(SimpleTestCase):
+    """Los tests usan un broker en memoria y nunca cargan el transporte de Redis. Si kombu y
+    redis-py son incompatibles, Celery no arranca en producción y la web sigue como si nada."""
+
+    def test_el_transporte_de_redis_acepta_la_version_de_redis_py(self):
+        conexion = Connection(
+            'redis://127.0.0.1:1/0',
+            transport_options={'socket_timeout': 1, 'socket_connect_timeout': 1},
+        )
+        self.addCleanup(conexion.release)
+        # El puerto está cerrado: debe llegar a intentar conectar, no fallar antes por versiones.
+        with self.assertRaises(OperationalError):
+            conexion.ensure_connection(max_retries=1, interval_start=0)
 
 
 class OpenApiDocsTest(_APITestCase):
