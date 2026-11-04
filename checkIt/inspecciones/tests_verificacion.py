@@ -10,11 +10,12 @@ from io import BytesIO
 from unittest.mock import patch
 from urllib.parse import urlencode
 
+from asn1crypto import cms
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from rest_framework import status
 from rest_framework.exceptions import ParseError
 from rest_framework.test import APIClient, APITestCase
@@ -794,3 +795,48 @@ class DatosCorruptosTest(_Base):
         data = self._anomalias()
         self.assertEqual((data['manifiestos'][0]['raiz'], data['manifiestos'][0]['total']), (otra, 1))
         self.assertEqual(data['anomalias'], 1)
+
+
+class VectoresDelFrontendTest(SimpleTestCase):
+    """La página comprueba las pruebas en JS: sus vectores salen de aquí. Si cambia el árbol
+    o el sello en Python, esto falla y hay que regenerarlos."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        ruta = settings.BASE_DIR.parent / 'frontend/src/utils/__tests__/vectores_verificacion.json'
+        cls.vectores = json.loads(ruta.read_text(encoding='utf-8'))
+
+    def test_inclusion(self):
+        for caso in self.vectores['inclusion']:
+            with self.subTest(caso['descripcion']):
+                self.assertIs(
+                    merkle.verificar_inclusion(
+                        bytes.fromhex(caso['hoja']), caso['indice'], caso['total'],
+                        [bytes.fromhex(nodo) for nodo in caso['prueba']], bytes.fromhex(caso['raiz']),
+                    ),
+                    caso['valida'],
+                )
+
+    def test_hay_casos_validos_e_invalidos(self):
+        self.assertEqual({caso['valida'] for caso in self.vectores['inclusion']}, {True, False})
+
+    def test_sellos(self):
+        for caso in self.vectores['sellos']:
+            self.assertEqual(huella_sellada(base64.b64decode(caso['token'])), caso['huella'])
+            info = cms.ContentInfo.load(base64.b64decode(caso['token']))['content']['encap_content_info']['content']
+            self.assertEqual(info.parsed['gen_time'].native.strftime('%Y-%m-%dT%H:%M:%SZ'), caso['hora'])
+
+    def test_respuesta_completa(self):
+        caso = self.vectores['respuesta']
+        self.assertTrue(merkle.verificar_inclusion(
+            bytes.fromhex(caso['foto']), caso['indice'], caso['total'],
+            [bytes.fromhex(nodo) for nodo in caso['prueba']], bytes.fromhex(caso['raiz']),
+        ))
+        self.assertEqual(huella_sellada(base64.b64decode(caso['token_raiz'])), caso['raiz'])
+        self.assertEqual(huella_sellada(base64.b64decode(caso['token_foto'])), caso['foto'])
+
+    def test_sellos_invalidos(self):
+        for caso in self.vectores['sellos_invalidos']:
+            with self.subTest(caso['descripcion']), self.assertRaises(ValueError):
+                huella_sellada(base64.b64decode(caso['token']))
