@@ -1,12 +1,14 @@
 """
-Tests del verificador público (GET /api/v1/verificacion/<clave>/<sha256>/): la prueba
+Tests del verificador público (POST /api/v1/verificacion/): la prueba
 devuelta se comprueba con merkle.verificar_inclusion y el sello con
 verificador_paquete.huella_sellada, sin confiar en lo que afirme el servidor.
 """
 import base64
 import hashlib
 import json
+from io import BytesIO
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.cache import cache
@@ -14,7 +16,8 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.exceptions import ParseError
+from rest_framework.test import APIClient, APITestCase
 
 from propiedades.models import Propiedad
 from users.models import User
@@ -25,7 +28,7 @@ from .services.verificacion import MAX_MANIFIESTOS, _sello_individual, _sello_vi
 from .services.verificador_paquete import huella_sellada
 from .tests import _make_image
 from .tests_sellos import _crear_tsa, _post_con_tsa, _sello, _texto
-from .verificacion_publica import VerificacionSerializer
+from .verificacion_publica import MAX_CUERPO, CuerpoAcotadoParser, VerificacionSerializer
 
 
 def _hash(n):
@@ -36,8 +39,7 @@ def _raiz(*hashes):
     return merkle.raiz([bytes.fromhex(h) for h in hashes]).hex()
 
 
-def _url(clave, hash_sha256):
-    return f'/api/v1/verificacion/{clave}/{hash_sha256}/'
+URL = '/api/v1/verificacion/'
 
 
 class _Base(APITestCase):
@@ -78,13 +80,16 @@ class _Base(APITestCase):
         with patch('inspecciones.services.manifiesto.solicitar_sello_tiempo', return_value=_sello(**sello)):
             self.assertTrue(sellar_manifiesto(pk))
 
+    def _post(self, clave, hash_sha256, **extra):
+        return self.client.post(URL, {'clave': clave, 'sha256': hash_sha256}, format='json', **extra)
+
     def _consultar(self, hash_sha256, clave=None):
-        response = self.client.get(_url(clave or self.clave, hash_sha256))
+        response = self._post(clave or self.clave, hash_sha256)
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.content)
         return response.json()
 
     def _no_encontrada(self, hash_sha256, clave=None):
-        response = self.client.get(_url(clave or self.clave, hash_sha256))
+        response = self._post(clave or self.clave, hash_sha256)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def _archivo(self, anteriores, inspeccion=None):
@@ -256,8 +261,8 @@ class SinClaveNoSeAprendeNadaTest(_Base):
     def test_clave_erronea_misma_respuesta_exista_o_no_la_foto(self):
         self._evidencia(_hash(1))
         self._completar()
-        con_foto = self.client.get(_url('b' * 64, _hash(1)))
-        sin_foto = self.client.get(_url('b' * 64, _hash(99)))
+        con_foto = self._post('b' * 64, _hash(1))
+        sin_foto = self._post('b' * 64, _hash(99))
         self.assertEqual((con_foto.status_code, con_foto.content), (sin_foto.status_code, sin_foto.content))
         self.assertEqual(con_foto.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -420,10 +425,92 @@ class EstadosTest(_Base):
 
 class ContratoHttpTest(_Base):
     def test_mal_formado_400_en_cualquiera_de_los_dos(self):
-        for malo in ('abc', 'g' * 64, 'a' * 63, 'a' * 65, 'a' * 64 + '%0A', 'á' * 64, 'a' * 63 + '%00'):
-            for url in (_url(malo, 'a' * 64), _url('a' * 64, malo)):
-                with self.assertNumQueries(0):
-                    self.assertEqual(self.client.get(url).status_code, status.HTTP_400_BAD_REQUEST, url)
+        for malo in (
+            'abc', 'g' * 64, 'a' * 63, 'a' * 65, 'a' * 64 + '\n', ' ' + 'a' * 64, 'á' * 64, 'a' * 63 + '\x00', '',
+            5, None, True, ['a' * 64], {'a': 1},
+        ):
+            for clave, sha256 in ((malo, 'a' * 64), ('a' * 64, malo)):
+                with self.subTest(clave=clave, sha256=sha256), self.assertNumQueries(0):
+                    self.assertEqual(self._post(clave, sha256).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cuerpo_incompleto_o_que_no_es_un_objeto_400(self):
+        for cuerpo in ({}, {'clave': 'a' * 64}, {'sha256': 'a' * 64}, ['a' * 64, 'b' * 64], 'a' * 64, 5, None):
+            with self.subTest(cuerpo=cuerpo), self.assertNumQueries(0):
+                response = self.client.post(URL, cuerpo, format='json')
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_json_invalido_400(self):
+        response = self.client.post(URL, '{no es json', content_type='application/json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_json_muy_anidado_400(self):
+        # La recursión del parser daría un 500, sin no-store y con un traceback en el log
+        for cuerpo in ('[' * 400, '[' * 2000, '{"a":' * 2000):
+            with self.subTest(largo=len(cuerpo)):
+                response = self.client.post(URL, cuerpo, content_type='application/json')
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_cuerpo_demasiado_grande_400_aunque_la_consulta_sea_valida(self):
+        self._evidencia(_hash(1))
+        consulta = json.dumps({'clave': self.clave, 'sha256': _hash(1)})
+        justo = consulta + ' ' * (MAX_CUERPO - len(consulta))
+        response = self.client.post(URL, justo, content_type='application/json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        with self.assertNumQueries(0):
+            response = self.client.post(URL, justo + ' ', content_type='application/json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_no_lee_mas_de_lo_permitido(self):
+        # Sin depender de Content-Length: un cuerpo troceado no lo lleva
+        stream = BytesIO(b' ' * (MAX_CUERPO * 10))
+        with self.assertRaises(ParseError):
+            CuerpoAcotadoParser().parse(stream)
+        self.assertEqual(stream.tell(), MAX_CUERPO + 1)
+
+    def test_solo_acepta_json(self):
+        # Un formulario de otra web no puede lanzar consultas sin preflight
+        cuerpo = {'clave': self.clave, 'sha256': _hash(1)}
+        self._evidencia(_hash(1))
+        response = self.client.post(URL, cuerpo, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+        response = self.client.post(URL, urlencode(cuerpo), content_type='application/x-www-form-urlencoded')
+        self.assertEqual(response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+    def test_la_clave_no_viaja_en_la_url(self):
+        # Los logs de acceso y los proxies guardan la URL: ni la ruta ni el GET deben aceptarla
+        self._evidencia(_hash(1))
+        ruta_antigua = f'{URL}{self.clave}/{_hash(1)}/'
+        self.assertEqual(self.client.get(ruta_antigua).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.post(ruta_antigua).status_code, status.HTTP_404_NOT_FOUND)
+        consulta = {'clave': self.clave, 'sha256': _hash(1)}
+        self.assertEqual(self.client.get(URL, consulta).status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(
+            self.client.post(f'{URL}?{urlencode(consulta)}', {}, format='json').status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    @override_settings(CORS_ALLOWED_ORIGINS=['https://pagina.example'])
+    def test_la_pagina_publica_pasa_el_preflight(self):
+        # El POST con JSON desde otro origen lo necesita
+        response = self.client.options(
+            URL, HTTP_ORIGIN='https://pagina.example', HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST',
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS='content-type',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Access-Control-Allow-Origin'], 'https://pagina.example')
+        self.assertIn('POST', response['Access-Control-Allow-Methods'])
+        self.assertIn('content-type', response['Access-Control-Allow-Headers'])
+
+    def test_no_exige_csrf(self):
+        # Sin cuenta ni cookies no hay sesión que proteger, y la página pública no tiene token
+        self._evidencia(_hash(1))
+        cliente = APIClient(enforce_csrf_checks=True)
+        response = cliente.post(URL, {'clave': self.clave, 'sha256': _hash(1)}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_normaliza_mayusculas_en_los_dos(self):
         self._evidencia(_hash(1))
@@ -439,8 +526,8 @@ class ContratoHttpTest(_Base):
     def test_ninguna_respuesta_se_guarda_en_caches_intermedias(self):
         # Cambia al reabrir; un 404 guardado negaría una foto subida después
         self._evidencia(_hash(1))
-        for url in (_url(self.clave, _hash(1)), _url('a' * 64, 'b' * 64), _url('abc', 'b' * 64)):
-            self.assertEqual(self.client.get(url)['Cache-Control'], 'no-store')
+        for clave, sha256 in ((self.clave, _hash(1)), ('a' * 64, 'b' * 64), ('abc', 'b' * 64)):
+            self.assertEqual(self._post(clave, sha256)['Cache-Control'], 'no-store')
 
     def test_cumple_el_esquema_publicado(self):
         self._evidencia(_hash(1), tsa_token=b'token-foto')
@@ -471,12 +558,12 @@ class ContratoHttpTest(_Base):
 
     def test_token_invalido_en_la_cabecera_no_da_401(self):
         self._evidencia(_hash(1))
-        response = self.client.get(_url(self.clave, _hash(1)), HTTP_AUTHORIZATION='Bearer basura')
+        response = self._post(self.clave, _hash(1), HTTP_AUTHORIZATION='Bearer basura')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_throttle(self):
         with patch('rest_framework.throttling.ScopedRateThrottle.THROTTLE_RATES', {'verificacion': '2/min'}):
-            codigos = [self.client.get(_url('a' * 64, 'b' * 64)).status_code for _ in range(3)]
+            codigos = [self._post('a' * 64, 'b' * 64).status_code for _ in range(3)]
         self.assertEqual(codigos, [404, 404, 429])
 
     def test_la_cuota_esta_configurada(self):
@@ -485,7 +572,10 @@ class ContratoHttpTest(_Base):
 
     def test_el_esquema_documenta_el_endpoint(self):
         schema = self.client.get('/api/v1/schema/?format=json')
-        self.assertIn('/api/v1/verificacion/{clave}/{sha256}/', schema.json()['paths'])
+        ruta = schema.json()['paths'][URL]
+        self.assertEqual(set(ruta), {'post'})
+        self.assertIn('application/json', ruta['post']['requestBody']['content'])
+        self.assertFalse(ruta['post'].get('parameters'))
 
 
 class TrabajoAcotadoTest(_Base):

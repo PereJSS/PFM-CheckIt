@@ -311,11 +311,13 @@ Cada propiedad admite un `external_id` opcional (único por admin): el identific
 
 ### Verificador público
 
-| Método | Ruta                            | Descripción                                      | Auth    |
-| ------ | ------------------------------- | ------------------------------------------------ | ------- |
-| GET    | /verificacion/{clave}/{sha256}/ | Prueba de inclusión y sellos de una foto         | Pública |
+| Método | Ruta           | Descripción                              | Auth    |
+| ------ | -------------- | ---------------------------------------- | ------- |
+| POST   | /verificacion/ | Prueba de inclusión y sellos de una foto | Pública |
 
-Hacen falta la foto (`sha256`) y la clave de verificación de la inspección, que llega con el acta: PDF, webhook (`clave_verificacion`) y paquete probatorio. La clave es aleatoria y no se deduce de las fotos. Sin ella la respuesta es un 404, exista o no la foto, y ni se consulta: tener una foto no enseña nada. Quien tenga el acta y la foto sí ve las fechas de sus sellos y cuántas fotos y reaperturas tiene esa inspección. La clave viaja en la URL, así que queda en los logs de acceso, junto con el hash consultado. No se puede rotar: quien la recibe conserva la consulta. Los PDF generados antes de añadir la clave no la llevan hasta que se regeneren.
+Cuerpo JSON: `{"clave": "<64 hex>", "sha256": "<64 hex>"}`.
+
+Hacen falta la foto (`sha256`) y la clave de verificación de la inspección, que llega con el acta: PDF, webhook (`clave_verificacion`) y paquete probatorio. La clave es aleatoria y no se deduce de las fotos. Sin ella la respuesta es un 404, exista o no la foto, y ni se consulta: tener una foto no enseña nada. Quien tenga el acta y la foto sí ve las fechas de sus sellos y cuántas fotos y reaperturas tiene esa inspección. La clave y el hash van en el cuerpo y no en la URL, para que no queden en los logs de acceso ni en los proxies. No se puede rotar: quien la recibe conserva la consulta. Los PDF generados antes de añadir la clave no la llevan hasta que se regeneren.
 
 Solo devuelve datos criptográficos, sin ids ni datos del cliente, y no da un veredicto: lo comprueba quien consulta recalculando la raíz con `prueba` y validando el sello (`token`, RFC 3161, en base64) con `openssl ts -verify`. `manifiestos` va del más antiguo al vigente, porque el primer sello es el que prueba la anterioridad; `vigente: false` indica un manifiesto archivado al reabrir, y las raíces sin sellar no se archivan. `anomalias` cuenta los datos guardados que no se pudieron leer o no cuadran: con 0, una lista vacía significa que la foto aún no ha entrado en ningún manifiesto. `truncado` es `true` con más de 20 manifiestos archivados o 20.000 hojas por petición. Responde 400 si la clave o la foto no tienen 64 caracteres hexadecimales, y 404 si la clave no existe o la foto no es de esa inspección.
 

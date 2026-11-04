@@ -1,9 +1,14 @@
 """
-Verificador público: GET /api/v1/verificacion/<clave>/<sha256>/, sin cuenta. Hacen falta
-la foto y la clave de verificación que llega con el acta; la respuesta no lleva datos del cliente.
+Verificador público: POST /api/v1/verificacion/, sin cuenta. Hacen falta la foto y la clave
+de verificación que llega con el acta; la respuesta no lleva datos del cliente. La clave va en
+el cuerpo porque los logs de acceso y los proxies guardan la URL.
 """
-from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
+from io import BytesIO
+
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import serializers, status
+from rest_framework.exceptions import ParseError
+from rest_framework.parsers import JSONParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -50,26 +55,47 @@ class VerificacionSerializer(serializers.Serializer):
     truncado = serializers.BooleanField(help_text='True si hay más manifiestos de los devueltos.')
 
 
+MAX_CUERPO = 512
+
+
+class CuerpoAcotadoParser(JSONParser):
+    """DRF lee el JSON entero, sin el límite de Django y con recursión: una consulta mide
+    unos 160 bytes, y en este tope no cabe un anidamiento que agote la pila."""
+
+    def parse(self, stream, media_type=None, parser_context=None):
+        cuerpo = stream.read(MAX_CUERPO + 1)
+        if len(cuerpo) > MAX_CUERPO:
+            raise ParseError('Cuerpo demasiado grande.')
+        return super().parse(BytesIO(cuerpo), media_type, parser_context)
+
+
+class PeticionVerificacionSerializer(serializers.Serializer):
+    clave = serializers.CharField(trim_whitespace=False, help_text='Clave de verificación del acta, en hex.')
+    sha256 = serializers.CharField(trim_whitespace=False, help_text='SHA-256 de la foto, en hex.')
+
+
 class VerificacionPublicaView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    parser_classes = [CuerpoAcotadoParser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'verificacion'
 
     @extend_schema(
         summary='Prueba de inclusión y sellos de una foto, con la clave de verificación del acta',
-        parameters=[
-            OpenApiParameter('clave', str, OpenApiParameter.PATH, description='Clave de verificación del acta, en hex.'),
-            OpenApiParameter('sha256', str, OpenApiParameter.PATH, description='SHA-256 de la foto, en hex.'),
-        ],
+        request=PeticionVerificacionSerializer,
         responses={
             200: VerificacionSerializer,
             400: OpenApiResponse(description='La clave o la foto no tienen 64 caracteres hexadecimales'),
             404: OpenApiResponse(description='Clave desconocida, o foto que no es de esa inspección'),
         },
     )
-    def get(self, request, clave, sha256):
-        clave, hash_sha256 = clave.lower(), sha256.lower()
+    def post(self, request):
+        peticion = PeticionVerificacionSerializer(data=request.data)
+        clave = hash_sha256 = ''
+        if peticion.is_valid():
+            clave = peticion.validated_data['clave'].lower()
+            hash_sha256 = peticion.validated_data['sha256'].lower()
         if not (_HASH_HEX.fullmatch(clave) and _HASH_HEX.fullmatch(hash_sha256)):
             return Response(
                 {"error": "La clave y la foto deben tener 64 caracteres hexadecimales."},
