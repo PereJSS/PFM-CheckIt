@@ -4,6 +4,7 @@ import Login from "./pages/login";
 import Register from "./pages/register";
 import AdminPage from "./pages/admin";
 import InspectionPage from "./pages/inspeccion";
+import Verificar from "./pages/verificar";
 import api from "./services/api";
 import { clearAuthTokens, getAccessToken } from "./services/authStorage";
 
@@ -79,6 +80,7 @@ export default function App() {
         {/* Rutas públicas */}
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/verificar" element={<Verificar />} />
 
         {/* Ruta protegida para el operario */}
         <Route
