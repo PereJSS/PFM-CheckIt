@@ -607,6 +607,70 @@ class DatosCorruptosTest(_Base):
         data = self._anomalias()
         self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
 
+    def _sin_la_hoja_de_la_foto(self):
+        # Manifiesto bien formado, pero sus hojas ya no dan la raíz sellada: quitaron la de la foto
+        return {**self.bueno, 'raiz': _raiz(_hash(1), _hash(2), _hash(3)), 'manifiesto': {'hojas': [
+            {'sha256': _hash(1)}, {'sha256': _hash(3)},
+        ]}}
+
+    def test_archivado_sin_la_hoja_de_la_foto_es_una_anomalia(self):
+        self._archivo([self._sin_la_hoja_de_la_foto()])
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(2))
+        self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_vigente_sin_la_hoja_de_una_foto_borrada_es_una_anomalia(self):
+        # Sin fila de la foto, nada más podría avisar de que el manifiesto cambió
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            manifiesto_raiz=_raiz(_hash(1), _hash(2), _hash(3)),
+            manifiesto={'hojas': [{'sha256': _hash(1)}, {'sha256': _hash(3)}]},
+        )
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(2))
+        self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_foto_ausente_de_un_manifiesto_integro_sigue_siendo_404(self):
+        # La raíz cuadra: la foto de verdad no está, y no hay nada que avisar
+        self._archivo([self.bueno])
+        with self.assertNoLogs('inspecciones.services.verificacion', level='WARNING'):
+            self._no_encontrada(_hash(99))
+
+    def test_una_hoja_quitada_cuenta_una_sola_anomalia_con_la_foto_registrada(self):
+        self._evidencia(_hash(2))
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            manifiesto_raiz=_raiz(_hash(1), _hash(2), _hash(3)),
+            manifiesto={'hojas': [{'sha256': _hash(1)}, {'sha256': _hash(3)}]},
+        )
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            self.assertEqual(self._consultar(_hash(2))['anomalias'], 1)
+
+    def test_sello_archivado_vacio_no_parece_un_sello(self):
+        self._archivo([{**self.bueno, 'tsa_token': ''}])
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(1))
+        self.assertIsNone(data['manifiestos'][0]['sello'])
+        self.assertEqual(data['anomalias'], 1)
+
+    def test_manifiesto_o_sello_vigente_sin_raiz_no_se_ignora(self):
+        for campos in (
+            {'manifiesto': {'hojas': [{'sha256': _hash(1)}]}},
+            {'manifiesto_tsa_token': b'sello'},
+        ):
+            Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+                **{'manifiesto': None, 'manifiesto_tsa_token': None, 'manifiesto_raiz': None, **campos},
+            )
+            with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+                data = self._consultar(_hash(1))
+            self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_sin_fila_de_la_foto_el_recorte_no_se_confunde_con_un_404(self):
+        # La foto puede estar en lo que no se miró
+        self.evidencia.delete()
+        self._archivo([self.bueno] * 3)
+        with patch('inspecciones.services.verificacion.MAX_HOJAS_POR_PETICION', 0):
+            data = self._consultar(_hash(1))
+        self.assertEqual((data['manifiestos'], data['anomalias'], data['truncado']), ([], 0, True))
+
     def test_foto_fuera_del_manifiesto_vigente_es_una_anomalia(self):
         # Con el manifiesto congelado no entran fotos: la fila o el manifiesto cambiaron
         self._completar()

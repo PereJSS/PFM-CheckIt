@@ -71,6 +71,8 @@ def _manifiestos(inspeccion, consulta, foto_registrada):
         # Primero, para que el archivo no le agote el presupuesto. Con el manifiesto congelado
         # no entran fotos: si la foto es de la inspección y no está, algo cambió.
         vigente = _prueba(consulta, inspeccion.manifiesto, inspeccion.manifiesto_raiz, debe_estar=foto_registrada)
+    elif inspeccion.manifiesto or inspeccion.manifiesto_tsa_token:
+        consulta.anomalia('manifiesto o sello vigente sin raíz')
 
     archivados = []
     anteriores = inspeccion.manifiestos_anteriores
@@ -121,7 +123,10 @@ def _prueba(consulta, manifiesto, raiz, debe_estar):
         consulta.anomalia('manifiesto mal formado: %r', exc)
         return None
     if indice is None:
-        if debe_estar:
+        # Si las hojas ya no dan la raíz sellada, la de esta foto pudo haber estado ahí
+        if merkle.raiz(hojas).hex() != raiz:
+            consulta.anomalia('las hojas no dan la raíz %s', raiz)
+        elif debe_estar:
             consulta.anomalia('foto registrada fuera de su manifiesto vigente')
         return None
 
@@ -158,7 +163,8 @@ def _sello_archivado(entrada, consulta):
     # Solo se archivan manifiestos sellados: un archivado sin token válido es una anomalía
     token = entrada.get('tsa_token')
     try:
-        base64.b64decode(token, validate=True)
+        if not base64.b64decode(token, validate=True):
+            raise ValueError('token vacío')
     except (binascii.Error, TypeError, ValueError):
         consulta.anomalia('sello archivado ilegible')
         return None
