@@ -129,6 +129,8 @@ Frontend disponible en:
 
 - http://localhost:5173
 
+Tests (Vitest + Testing Library): `npm test`. Los vectores de `src/utils/__tests__/vectores_verificacion.json` salen del `merkle.py` real y `VectoresDelFrontendTest` los revalida en el backend.
+
 Vite proxifica automáticamente /api hacia http://localhost:8000 en desarrollo.
 
 Nota: el script run_gunicorn.sh espera el entorno virtual en .env. Si prefieres .venv, ajusta ese script o crea el entorno con nombre .env.
@@ -320,6 +322,8 @@ Cuerpo JSON: `{"clave": "<64 hex>", "sha256": "<64 hex>"}`.
 Hacen falta la foto (`sha256`) y la clave de verificación de la inspección, que llega con el acta: PDF, webhook (`clave_verificacion`) y paquete probatorio. La clave es aleatoria y no se deduce de las fotos. Sin ella la respuesta es un 404, exista o no la foto, y ni se consulta: tener una foto no enseña nada. Quien tenga el acta y la foto sí ve las fechas de sus sellos y cuántas fotos y reaperturas tiene esa inspección. La clave y el hash van en el cuerpo y no en la URL, para que no queden en los logs de acceso ni en los proxies. No se puede rotar: quien la recibe conserva la consulta. Los PDF generados antes de añadir la clave no la llevan hasta que se regeneren.
 
 Solo devuelve datos criptográficos, sin ids ni datos del cliente, y no da un veredicto: lo comprueba quien consulta recalculando la raíz con `prueba` y validando el sello (`token`, RFC 3161, en base64) con `openssl ts -verify`. `manifiestos` va del más antiguo al vigente, porque el primer sello es el que prueba la anterioridad; `vigente: false` indica un manifiesto archivado al reabrir, y las raíces sin sellar no se archivan. `anomalias` cuenta los datos guardados que no se pudieron leer o no cuadran: con 0, una lista vacía significa que la foto aún no ha entrado en ningún manifiesto. `truncado` es `true` con más de 20 manifiestos archivados o 20.000 hojas por petición. Responde 400 si la clave o la foto no tienen 64 caracteres hexadecimales, y 404 si la clave no existe o la foto no es de esa inspección.
+
+La página pública `/verificar` del frontend usa este endpoint para quien no tiene cuenta: el navegador calcula el hash de la foto, que no se sube, y solo envía el hash y la clave. Después recalcula la inclusión en cada manifiesto y la huella y la hora de cada sello. La firma del sello no se valida en el navegador: la página da el `.tst` y el comando de `openssl`. Hace falta el archivo exacto; una copia recomprimida tiene otro hash.
 
 ### Integraciones (PMS externos)
 
@@ -557,4 +561,4 @@ GitHub Actions (`.github/workflows/ci.yml`) se ejecuta en cada push y pull reque
 
 - **Backend**: Python 3.10 y 3.13 (3.10 es el mínimo por `psycopg[binary]==3.3.4`), instala `checkIt/requirements.txt`, ejecuta `makemigrations --check --dry-run` y `manage.py test` (SQLite; Celery y TSA mockeados).
 - **Backend** también valida el esquema OpenAPI (`spectacular --validate --fail-on-warn`).
-- **Frontend**: Node 20, `npm ci`, `npm run lint -- --max-warnings 0` y `npm run build`. El lockfile se regenera con `npx npm@10.8.2 install` para que siga siendo compatible con el npm de Node 20.
+- **Frontend**: Node 20, `npm ci`, `npm run lint -- --max-warnings 0`, `npm run build` y `npm test` (Vitest). El lockfile se regenera con `npx npm@10.8.2 install --package-lock-only` para que siga siendo compatible con el npm de Node 20.
