@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import tempfile
 from datetime import timedelta
 from io import BytesIO
@@ -250,6 +251,49 @@ class UploadEvidenceTest(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Evidencia.objects.count(), 1)
+
+    @override_settings(STORAGES={'default': {'BACKEND': 'django.core.files.storage.InMemoryStorage'}})
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_la_foto_se_guarda_con_un_nombre_del_servidor_y_no_del_cliente(self, _mock_tsa):
+        """La extensión sale del content_type validado: el nombre del cliente no se valida."""
+        self.client.force_authenticate(user=self.op)
+        for del_cliente in ('IMG 0001 cocina.JPG', 'pagina.html', 'x.exe', 'sin_extension', 'a' * 40 + '.' + 'b' * 80):
+            with self.subTest(del_cliente=del_cliente):
+                respuesta = self.client.post(
+                    self._url(self.insp.pk), {'foto': _make_image(del_cliente)}, format='multipart',
+                )
+                self.assertEqual(respuesta.status_code, status.HTTP_201_CREATED)
+                nombre = Evidencia.objects.latest('pk').foto.name
+                self.assertRegex(nombre, rf'^evidencias/{self.insp.pk}/[0-9a-f]{{32}}\.jpg$')
+
+    def test_sin_content_type_solo_se_acepta_una_extension_de_imagen_conocida(self):
+        from .models import ruta_evidencia
+        evidencia = Evidencia(inspeccion=self.insp)
+        casos = {'foto.JPEG': '.jpg', 'foto.png': '.png', 'foto.html': '', 'foto': ''}
+        for del_cliente, extension in casos.items():
+            with self.subTest(del_cliente=del_cliente):
+                self.assertRegex(
+                    ruta_evidencia(evidencia, del_cliente),
+                    rf'^evidencias/{self.insp.pk}/[0-9a-f]{{32}}{re.escape(extension)}$',
+                )
+
+    def test_sin_inspeccion_no_se_inventa_una_ruta(self):
+        from .models import ruta_evidencia
+        with self.assertRaises(ValueError):
+            ruta_evidencia(Evidencia(), 'foto.jpg')
+
+    @override_settings(STORAGES={'default': {'BACKEND': 'inspecciones.tests.StorageWorm'}})
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_dos_fotos_con_el_mismo_nombre_no_chocan_en_un_bucket_bloqueado(self, _mock_tsa):
+        """En R2 con WORM, escribir sobre un nombre existente da 409: el nombre no puede
+        depender de exists() (HEAD y PUT no son atómicos) ni del que manda el cliente."""
+        self.client.force_authenticate(user=self.op)
+        with patch.object(StorageWorm, 'get_available_name', side_effect=lambda nombre, max_length=None: nombre):
+            for _ in range(2):
+                respuesta = self.client.post(self._url(self.insp.pk), {'foto': _make_image()}, format='multipart')
+                self.assertEqual(respuesta.status_code, status.HTTP_201_CREATED)
+        nombres = set(Evidencia.objects.values_list('foto', flat=True))
+        self.assertEqual(len(nombres), 2)
 
     @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
     def test_hash_stored_and_tsa_called_when_hash_provided(self, mock_tsa):

@@ -1,4 +1,6 @@
+import os
 import secrets
+import uuid
 
 from django.db import models
 
@@ -84,10 +86,43 @@ class Inspeccion(models.Model):
         estados = {str(valor): etiqueta for valor, etiqueta in self.Estado.choices}
         return estados.get(self.estado, self.estado)
 
+
+# Extensión por tipo de imagen admitido (la vista solo deja pasar estos content_type)
+EXTENSION_POR_TIPO = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+}
+
+
+def ruta_evidencia(instance, filename):
+    """Nombre de la foto en el storage, elegido por el servidor: el bucket está bloqueado
+    (WORM) y escribir sobre un nombre existente falla. Un UUID no depende de exists()
+    (HEAD y PUT no son atómicos) ni del nombre que manda el cliente.
+
+    La extensión (la usa el paquete probatorio) sale del content_type ya validado, nunca
+    del nombre del cliente: nadie la valida, y una larga o como .html no debe llegar al bucket.
+    Sin content_type (p. ej. seed_demo) se acepta solo una extensión de imagen conocida."""
+    if instance.inspeccion_id is None:
+        raise ValueError('La evidencia necesita su inspección antes de guardar la foto')
+    try:
+        tipo = str(getattr(instance.foto.file, 'content_type', '') or '').lower()
+    except ValueError:  # FieldFile sin fichero asociado todavía
+        tipo = ''
+    extension = EXTENSION_POR_TIPO.get(tipo)
+    if extension is None:
+        propia = os.path.splitext(filename)[1].lower()
+        conocidas = {'.jpeg': '.jpg', **{e: e for e in EXTENSION_POR_TIPO.values()}}
+        extension = conocidas.get(propia, '')
+    return f'evidencias/{int(instance.inspeccion_id)}/{uuid.uuid4().hex}{extension}'
+
+
 # Modelo para almacenar evidencias (fotos) de las inspecciones
 class Evidencia(models.Model):
     inspeccion = models.ForeignKey(Inspeccion, on_delete=models.CASCADE, related_name="evidencias")
-    foto = models.ImageField(upload_to="evidencias/")
+    foto = models.ImageField(upload_to=ruta_evidencia)
     descripcion = models.TextField(blank=True, null=True)
     # Pese al nombre, es la hora en que el servidor recibió la foto
     fecha_captura = models.DateTimeField(auto_now_add=True)
