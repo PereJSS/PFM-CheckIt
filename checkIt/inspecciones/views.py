@@ -55,6 +55,11 @@ def _is_operario_user(usuario):
     return role == 'OPERARIO'
 
 
+def _es_operario_de(usuario, administrador):
+    """Un operario solo se asigna a las inspecciones del administrador que lo dio de alta."""
+    return _is_operario_user(usuario) and usuario.administrador_id == administrador.pk
+
+
 def _validate_evidence_file(foto):
     if not foto:
         return "El campo 'foto' es obligatorio."
@@ -172,9 +177,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not operario or not _is_operario_user(operario):
+        if not operario or not _es_operario_de(operario, usuario):
             return Response(
-                {"error": "La inspección debe asignarse a un usuario operario válido."},
+                {"error": "La inspección debe asignarse a uno de tus operarios."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -201,9 +206,14 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 )
 
             nuevo_operario = serializer.validated_data.get('operario')
-            if nuevo_operario and not _is_operario_user(nuevo_operario):
+            # Reenviar el operario que ya tiene no da ningún acceso nuevo (p. ej. uno anterior sin administrador)
+            if (
+                nuevo_operario
+                and nuevo_operario.pk != inspeccion.operario_id
+                and not _es_operario_de(nuevo_operario, usuario)
+            ):
                 return Response(
-                    {"error": "El usuario asignado debe ser operario."},
+                    {"error": "El usuario asignado debe ser uno de tus operarios."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 

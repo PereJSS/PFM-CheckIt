@@ -250,8 +250,8 @@ Usuarios demo:
 | ------------- | ------------ | ------------- |
 | admin_demo    | checkIt2026! | Administrador |
 | admin_partner | checkIt2026! | Administrador |
-| operario1     | checkIt2026! | Operario      |
-| operario2     | checkIt2026! | Operario      |
+| operario1     | checkIt2026! | Operario de `admin_demo` |
+| operario2     | checkIt2026! | Operario de `admin_partner` |
 
 El seed actual crea 6 propiedades y 6 inspecciones de ejemplo, repartidas entre ambos administradores.
 

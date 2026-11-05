@@ -59,7 +59,10 @@ class OperariosView(APIView):
     def get(self, request):
         if not request.user.is_admin():
             return Response({"error": "Sin permisos."}, status=403)
-        operarios = User.objects.filter(role=User.Role.OPERARIO).order_by("first_name", "username")
+        # Solo los suyos: los de otros clientes no se ven (ni sus emails)
+        operarios = User.objects.filter(
+            role=User.Role.OPERARIO, administrador=request.user,
+        ).order_by("first_name", "username")
         data = [
             {
                 "id": u.pk,
@@ -77,7 +80,7 @@ class OperariosView(APIView):
             return Response({"error": "Sin permisos."}, status=403)
         serializer = OperarioCreateSerializer(data=request.data)
         if serializer.is_valid():
-            user = cast(User, serializer.save())
+            user = cast(User, serializer.save(administrador=request.user))
             return Response(
                 {"id": user.pk, "username": user.username, "nombre": user.get_full_name() or user.username},
                 status=status.HTTP_201_CREATED,
@@ -94,7 +97,8 @@ class OperarioDetailView(APIView):
         if not request.user.is_admin():
             return Response({"error": "Sin permisos."}, status=403)
         try:
-            user = User.objects.get(pk=pk, role=User.Role.OPERARIO)
+            # Uno ajeno da 404 como uno inexistente: no se revela que existe
+            user = User.objects.get(pk=pk, role=User.Role.OPERARIO, administrador=request.user)
         except User.DoesNotExist:
             return Response({"error": "Operario no encontrado."}, status=404)
         user.delete()

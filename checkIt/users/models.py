@@ -15,6 +15,18 @@ class User(AbstractUser):
         default=Role.OPERARIO, # Ahora sí lo encontrará dentro de Role
         verbose_name="Rol del usuario"
     )
+    # Solo operarios: el administrador (cliente) que lo dio de alta. Solo ese administrador
+    # lo ve, lo borra y se lo asigna. Sin él (operarios anteriores), nadie puede asignarlo.
+    # SET_NULL: borrar al administrador no borra la cuenta ni el rastro de sus inspecciones
+    administrador = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='operarios',
+        limit_choices_to={'role': 'ADMINISTRADOR'},
+        verbose_name="Administrador del operario",
+    )
 
     def is_admin(self):
         role = (self.role or "").strip().upper()

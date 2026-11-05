@@ -51,6 +51,7 @@ op1 = User.objects.create_user(
     last_name="Martínez",
     email="carlos@checkit.local",
     role=User.Role.OPERARIO,
+    administrador=admin,
 )
 op2 = User.objects.create_user(
     username="operario2",
@@ -59,6 +60,7 @@ op2 = User.objects.create_user(
     last_name="Fernández",
     email="lucia@checkit.local",
     role=User.Role.OPERARIO,
+    administrador=admin_partner,
 )
 print(f"Usuarios creados: {admin}, {admin_partner}, {op1}, {op2}")
 
@@ -109,9 +111,9 @@ print(
 # ── Inspecciones ─────────────────────────────────────────────────────────────
 i1 = Inspeccion.objects.create(propiedad=p1, operario=op1, estado=Inspeccion.Estado.PENDIENTE)
 i2 = Inspeccion.objects.create(propiedad=p2, operario=op1, estado=Inspeccion.Estado.EN_PROGRESO)
-i3 = Inspeccion.objects.create(propiedad=p3, operario=op2, estado=Inspeccion.Estado.COMPLETADA)
+i3 = Inspeccion.objects.create(propiedad=p3, operario=op1, estado=Inspeccion.Estado.COMPLETADA)
 i4 = Inspeccion.objects.create(propiedad=p4, operario=op2, estado=Inspeccion.Estado.PENDIENTE)
-i5 = Inspeccion.objects.create(propiedad=p5, operario=op1, estado=Inspeccion.Estado.EN_PROGRESO)
+i5 = Inspeccion.objects.create(propiedad=p5, operario=op2, estado=Inspeccion.Estado.EN_PROGRESO)
 i6 = Inspeccion.objects.create(propiedad=p6, operario=op2, estado=Inspeccion.Estado.COMPLETADA)
 print(f"Inspecciones creadas: #{i1.pk}, #{i2.pk}, #{i3.pk}, #{i4.pk}, #{i5.pk}, #{i6.pk}")
 

@@ -130,7 +130,7 @@ class OperariosViewTest(APITestCase):
             username='admin', password='Pass1234!', role=User.Role.ADMIN
         )
         self.operario = User.objects.create_user(
-            username='op1', password='Pass1234!', role=User.Role.OPERARIO
+            username='op1', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin,
         )
 
     def test_admin_lists_only_operarios(self):
@@ -174,13 +174,101 @@ class OperariosViewTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
+class AislamientoOperariosTest(APITestCase):
+    """Un administrador (cliente) solo ve, borra y asigna sus propios operarios."""
+    URL = '/api/v1/usuarios/operarios/'
+
+    def setUp(self):
+        self.admin1 = User.objects.create_user(username='admin1', password='Pass1234!', role=User.Role.ADMIN)
+        self.admin2 = User.objects.create_user(username='admin2', password='Pass1234!', role=User.Role.ADMIN)
+        self.client.force_authenticate(user=self.admin1)
+        respuesta = self.client.post(self.URL, {
+            'username': 'op_de_admin1', 'email': 'op1@cliente1.test', 'password': 'SecurePass123!',
+        })
+        self.assertEqual(respuesta.status_code, status.HTTP_201_CREATED)
+        self.op1 = User.objects.get(username='op_de_admin1')
+
+    def test_el_operario_creado_queda_ligado_a_su_administrador(self):
+        self.assertEqual(self.op1.administrador, self.admin1)
+
+    def test_el_administrador_no_se_puede_elegir_desde_el_body(self):
+        self.client.post(self.URL, {
+            'username': 'colado', 'password': 'SecurePass123!', 'administrador': self.admin2.pk,
+        })
+        self.assertEqual(User.objects.get(username='colado').administrador, self.admin1)
+
+    def test_el_administrador_ve_sus_operarios(self):
+        respuesta = self.client.get(self.URL)
+        self.assertEqual([o['username'] for o in respuesta.data], ['op_de_admin1'])
+
+    def test_otro_administrador_no_ve_operarios_ajenos(self):
+        self.client.force_authenticate(user=self.admin2)
+        respuesta = self.client.get(self.URL)
+        self.assertEqual(respuesta.status_code, status.HTTP_200_OK)
+        self.assertEqual(respuesta.data, [])
+
+    def test_otro_administrador_no_puede_borrar_un_operario_ajeno(self):
+        self.client.force_authenticate(user=self.admin2)
+        respuesta = self.client.delete(f'{self.URL}{self.op1.pk}/')
+        # 404 y no 403: no se revela que el operario existe
+        self.assertEqual(respuesta.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(User.objects.filter(pk=self.op1.pk).exists())
+
+
+class RellenarAdministradorMigracionTest(TestCase):
+    """0003: solo se liga el operario cuyas inspecciones son todas de un único administrador."""
+
+    def _rellenar(self):
+        import importlib
+        from django.apps import apps
+        migracion = importlib.import_module('users.migrations.0003_rellenar_administrador_de_operarios')
+        migracion.rellenar(apps, None)
+
+    def test_liga_solo_cuando_no_hay_duda(self):
+        from inspecciones.models import Inspeccion
+        from propiedades.models import Propiedad
+        a1 = User.objects.create_user(username='a1', password='x', role=User.Role.ADMIN)
+        a2 = User.objects.create_user(username='a2', password='x', role=User.Role.ADMIN)
+        p1 = Propiedad.objects.create(owner=a1, nombre='P1', direccion='C1')
+        p2 = Propiedad.objects.create(owner=a2, nombre='P2', direccion='C2')
+        de_uno = User.objects.create_user(username='de_uno', password='x', role=User.Role.OPERARIO)
+        de_dos = User.objects.create_user(username='de_dos', password='x', role=User.Role.OPERARIO)
+        sin_nada = User.objects.create_user(username='sin_nada', password='x', role=User.Role.OPERARIO)
+        ya_ligado = User.objects.create_user(
+            username='ya_ligado', password='x', role=User.Role.OPERARIO, administrador=a2,
+        )
+        Inspeccion.objects.create(propiedad=p1, operario=de_uno)
+        Inspeccion.objects.create(propiedad=p1, operario=de_uno)
+        Inspeccion.objects.create(propiedad=p1, operario=de_dos)
+        Inspeccion.objects.create(propiedad=p2, operario=de_dos)
+        Inspeccion.objects.create(propiedad=p1, operario=ya_ligado)
+
+        self._rellenar()
+
+        administradores = dict(User.objects.filter(role=User.Role.OPERARIO).values_list('username', 'administrador'))
+        self.assertEqual(administradores, {
+            'de_uno': a1.pk, 'de_dos': None, 'sin_nada': None, 'ya_ligado': a2.pk,
+        })
+
+    def test_no_liga_a_un_dueno_que_no_es_administrador(self):
+        from inspecciones.models import Inspeccion
+        from propiedades.models import Propiedad
+        no_admin = User.objects.create_user(username='no_admin', password='x', role=User.Role.OPERARIO)
+        propiedad = Propiedad.objects.create(owner=no_admin, nombre='P', direccion='C')
+        operario = User.objects.create_user(username='op', password='x', role=User.Role.OPERARIO)
+        Inspeccion.objects.create(propiedad=propiedad, operario=operario)
+        self._rellenar()
+        operario.refresh_from_db()
+        self.assertIsNone(operario.administrador)
+
+
 class OperarioDetailViewTest(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(
             username='admin', password='Pass1234!', role=User.Role.ADMIN
         )
         self.operario = User.objects.create_user(
-            username='op1', password='Pass1234!', role=User.Role.OPERARIO
+            username='op1', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin,
         )
 
     def _url(self, pk):

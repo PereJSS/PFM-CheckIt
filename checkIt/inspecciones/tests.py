@@ -90,10 +90,10 @@ class InspeccionViewSetTest(APITestCase):
             username='admin2', password='Pass1234!', role=User.Role.ADMIN
         )
         self.op1 = User.objects.create_user(
-            username='op1', password='Pass1234!', role=User.Role.OPERARIO
+            username='op1', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin1,
         )
         self.op2 = User.objects.create_user(
-            username='op2', password='Pass1234!', role=User.Role.OPERARIO
+            username='op2', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin2,
         )
         self.prop1 = Propiedad.objects.create(
             owner=self.admin1, nombre='Prop1', direccion='C1'
@@ -133,6 +133,33 @@ class InspeccionViewSetTest(APITestCase):
             'propiedad': self.prop1.pk, 'operario': self.admin2.pk
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_no_puede_asignar_un_operario_de_otro_cliente_al_crear(self):
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.post(self.URL, {'propiedad': self.prop1.pk, 'operario': self.op2.pk})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Inspeccion.objects.filter(operario=self.op2, propiedad=self.prop1).exists())
+
+    def test_admin_no_puede_reasignar_a_un_operario_de_otro_cliente(self):
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.patch(f'{self.URL}{self.insp1.pk}/', {'operario': self.op2.pk})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.insp1.refresh_from_db()
+        self.assertEqual(self.insp1.operario, self.op1)
+
+    def test_admin_no_puede_asignar_un_operario_sin_administrador(self):
+        huerfano = User.objects.create_user(username='huerfano', password='x', role=User.Role.OPERARIO)
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.post(self.URL, {'propiedad': self.prop1.pk, 'operario': huerfano.pk})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reenviar_el_mismo_operario_anterior_no_bloquea_la_edicion(self):
+        """Una inspección de antes del arreglo con un operario sin administrador sigue editable."""
+        huerfano = User.objects.create_user(username='huerfano', password='x', role=User.Role.OPERARIO)
+        Inspeccion.objects.filter(pk=self.insp1.pk).update(operario=huerfano)
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.patch(f'{self.URL}{self.insp1.pk}/', {'operario': huerfano.pk})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     # --- List ---
 
@@ -1180,7 +1207,9 @@ class CamposPdfSoloLecturaTest(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(username='admin_a', password='Pass1234!', role=User.Role.ADMIN)
         self.otro = User.objects.create_user(username='admin_b', password='Pass1234!', role=User.Role.ADMIN)
-        self.operario = User.objects.create_user(username='op_a', password='Pass1234!', role=User.Role.OPERARIO)
+        self.operario = User.objects.create_user(
+            username='op_a', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin,
+        )
         self.propiedad = Propiedad.objects.create(owner=self.admin, nombre='A', direccion='C')
         self.insp = Inspeccion.objects.create(propiedad=self.propiedad, operario=self.operario)
         self.ajena = Inspeccion.objects.create(propiedad=Propiedad.objects.create(owner=self.otro, nombre='B', direccion='C'))
