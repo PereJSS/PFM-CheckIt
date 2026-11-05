@@ -6,7 +6,7 @@ from io import BytesIO
 from unittest.mock import patch, MagicMock
 
 from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
+from django.core.files.storage import InMemoryStorage, default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -991,6 +991,23 @@ class PdfFirmadoUrlTest(APITestCase):
         self.assertEqual(codes[2], status.HTTP_429_TOO_MANY_REQUESTS)
 
 
+class ObjetoBloqueado(Exception):
+    pass
+
+
+class StorageWorm(InMemoryStorage):
+    """Como un bucket R2 con bucket lock: no se borra ni se sobrescribe nada.
+    Ni siquiera hace falta preguntar si existe: el nombre ya es único."""
+
+    def delete(self, name):
+        raise ObjetoBloqueado(f'409 ObjectLockedByBucketPolicy: {name}')
+
+    def _save(self, name, content):
+        if super().exists(name):
+            raise ObjetoBloqueado(f'409 ObjectLockedByBucketPolicy: {name}')
+        return super()._save(name, content)
+
+
 class AlmacenamientoPdfTest(TestCase):
     """El PDF y las fotos pasan por el storage de Django (S3/R2 en producción)."""
 
@@ -1015,7 +1032,11 @@ class AlmacenamientoPdfTest(TestCase):
     def test_la_tarea_guarda_el_pdf_firmado_en_el_storage(self):
         self._generar()
         self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.LISTO)
-        self.assertEqual(self.insp.pdf_ruta, f'informes/Reclamacion_Fianza_{self.insp.pk}_Firmada.pdf')
+        # Cada versión con nombre propio: con el bucket bloqueado (WORM) no se puede reutilizar
+        self.assertRegex(
+            self.insp.pdf_ruta,
+            rf'^informes/{self.insp.pk}/Reclamacion_Fianza_{self.insp.pk}_\d{{8}}T\d{{6}}Z_[0-9a-f]{{8}}_Firmada\.pdf$',
+        )
         with default_storage.open(self.insp.pdf_ruta, 'rb') as f:
             self.assertEqual(f.read(), b'%PDF-1.7 firmado')
 
@@ -1026,13 +1047,35 @@ class AlmacenamientoPdfTest(TestCase):
             self._generar()
         self.assertEqual(os.listdir(directorio), [])
 
-    def test_regenerar_sustituye_el_pdf_con_el_mismo_nombre(self):
+    def test_regenerar_guarda_una_version_nueva_sin_borrar_la_anterior(self):
         self._generar(b'%PDF v1')
         primero = self.insp.pdf_ruta
         self._generar(b'%PDF v2')
-        self.assertEqual(self.insp.pdf_ruta, primero)
+        self.assertNotEqual(self.insp.pdf_ruta, primero)
         with default_storage.open(primero, 'rb') as f:
+            self.assertEqual(f.read(), b'%PDF v1')
+        with default_storage.open(self.insp.pdf_ruta, 'rb') as f:
             self.assertEqual(f.read(), b'%PDF v2')
+
+    @override_settings(STORAGES={'default': {'BACKEND': 'inspecciones.tests.StorageWorm'}})
+    def test_regenerar_funciona_con_el_bucket_bloqueado(self):
+        """Con el bucket lock de R2, borrar o sobrescribir da 409 ObjectLockedByBucketPolicy."""
+        self._generar(b'%PDF v1')
+        primero = self.insp.pdf_ruta
+        self._generar(b'%PDF v2')
+        self.assertEqual(self.insp.pdf_estado, Inspeccion.PdfEstado.LISTO)
+        self.assertNotEqual(self.insp.pdf_ruta, primero)
+        with default_storage.open(primero, 'rb') as f:
+            self.assertEqual(f.read(), b'%PDF v1')
+
+    def test_cada_nombre_es_unico_aunque_coincida_el_segundo_y_va_en_utc(self):
+        from .services.almacen import nombre_pdf
+        fijo = timezone.datetime(2026, 11, 5, 21, 15, 0, tzinfo=timezone.get_fixed_timezone(60))
+        with patch('inspecciones.services.almacen.timezone.now', return_value=fijo):
+            nombres = {nombre_pdf(7) for _ in range(50)}
+        self.assertEqual(len(nombres), 50)
+        for nombre in nombres:
+            self.assertRegex(nombre, r'^informes/7/Reclamacion_Fianza_7_20261105T201500Z_[0-9a-f]{8}_Firmada\.pdf$')
 
     def test_las_fotos_se_leen_del_storage_y_no_de_una_ruta_local(self):
         from .services.pdf_generator import generar_informe_base
