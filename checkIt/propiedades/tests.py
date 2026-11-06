@@ -57,11 +57,36 @@ class PropiedadViewSetTest(APITestCase):
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['nombre'], 'Prop Admin2')
 
-    def test_operario_list_is_empty(self):
+    # --- Operarios: el endpoint es solo de administradores ---
+
+    def test_operario_no_puede_listar(self):
         self.client.force_authenticate(user=self.operario)
         response = self.client.get(self.URL)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_operario_no_puede_crear_propiedades(self):
+        self.client.force_authenticate(user=self.operario)
+        response = self.client.post(
+            self.URL, {'nombre': 'Mía', 'direccion': 'Calle 9'}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Propiedad.objects.filter(owner=self.operario).exists())
+
+    def test_operario_no_puede_ver_editar_ni_borrar_la_suya(self):
+        # Una propiedad cuyo dueño es un operario (las que se crearon antes del 6 nov).
+        propia = Propiedad.objects.create(owner=self.operario, nombre='Vieja', direccion='Calle 8')
+        self.client.force_authenticate(user=self.operario)
+        url = f'{self.URL}{propia.pk}/'
+        peticiones = {
+            'retrieve': lambda: self.client.get(url),
+            'patch': lambda: self.client.patch(url, {'nombre': 'Nueva'}, format='json'),
+            'delete': lambda: self.client.delete(url),
+        }
+        for accion, peticion in peticiones.items():
+            with self.subTest(accion=accion):
+                self.assertEqual(peticion().status_code, status.HTTP_403_FORBIDDEN)
+        propia.refresh_from_db()
+        self.assertEqual(propia.nombre, 'Vieja')
 
     def test_unauthenticated_returns_401(self):
         response = self.client.get(self.URL)

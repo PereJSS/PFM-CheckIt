@@ -1,13 +1,15 @@
 from django.db import IntegrityError, transaction
 from rest_framework import serializers, viewsets
 from rest_framework.permissions import IsAuthenticated
+from users.permissions import IsAdmin
 from .models import Propiedad
 from .serializers import PropiedadSerializer
 
 
 class PropiedadViewSet(viewsets.ModelViewSet):
     serializer_class = PropiedadSerializer
-    permission_classes = [IsAuthenticated]
+    # Las propiedades son del cliente (el administrador): un operario no lista, crea ni edita.
+    permission_classes = [IsAuthenticated, IsAdmin]
 
     def get_queryset(self):  # type: ignore[override]
         return Propiedad.objects.filter(owner=self.request.user).order_by('nombre')
