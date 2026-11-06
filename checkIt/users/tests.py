@@ -356,3 +356,201 @@ class AuthThrottleTest(APITestCase):
             self._login('u1')
             resp = self._login('otro')
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class OperariosHuerfanosCommandTest(TestCase):
+    """`manage.py operarios_huerfanos`: solo lee; lista operarios sin administrador y
+    propiedades cuyo dueño es un operario, con la orden sugerida para arreglarlos."""
+
+    def setUp(self):
+        from propiedades.models import Propiedad
+        self.Propiedad = Propiedad
+        self.admin_a = User.objects.create_user(username='admin_a', password='x', role=User.Role.ADMIN)
+        self.admin_b = User.objects.create_user(username='admin_b', password='x', role=User.Role.ADMIN)
+        self.prop_a = Propiedad.objects.create(owner=self.admin_a, nombre='Piso A', direccion='Calle A')
+        self.prop_b = Propiedad.objects.create(owner=self.admin_b, nombre='Piso B', direccion='Calle B')
+
+    def _operario(self, username, administrador=None):
+        return User.objects.create_user(
+            username=username, password='x', role=User.Role.OPERARIO, administrador=administrador
+        )
+
+    def _inspeccion(self, propiedad, operario):
+        from inspecciones.models import Inspeccion
+        return Inspeccion.objects.create(propiedad=propiedad, operario=operario)
+
+    def _ejecutar(self):
+        from io import StringIO
+        from django.core.management import call_command
+        salida = StringIO()
+        call_command('operarios_huerfanos', stdout=salida)
+        return salida.getvalue()
+
+    def test_sin_datos_dice_sin_huerfanos(self):
+        self._operario('ligado', administrador=self.admin_a)
+        salida = self._ejecutar()
+        self.assertIn('Sin huérfanos', salida)
+        self.assertNotIn('ligado', salida)
+
+    def test_huerfano_con_un_solo_dueno_sugiere_ese_administrador(self):
+        op = self._operario('op_uno')
+        i1 = self._inspeccion(self.prop_a, op)
+        i2 = self._inspeccion(self.prop_a, op)
+        salida = self._ejecutar()
+        self.assertIn(f'op_uno (#{op.pk})', salida)
+        self.assertIn(f'#{i1.pk}', salida)
+        self.assertIn(f'#{i2.pk}', salida)
+        self.assertIn(
+            f'User.objects.filter(pk={op.pk}).update(administrador_id={self.admin_a.pk})', salida
+        )
+        self.assertNotIn('Sin huérfanos', salida)
+
+    def test_huerfano_con_varios_duenos_pide_revisar_a_mano(self):
+        op = self._operario('op_varios')
+        self._inspeccion(self.prop_a, op)
+        self._inspeccion(self.prop_b, op)
+        salida = self._ejecutar()
+        self.assertIn('op_varios', salida)
+        self.assertIn('varios dueños', salida)
+        self.assertIn('admin_a', salida)
+        self.assertIn('admin_b', salida)
+        self.assertNotIn(f'User.objects.filter(pk={op.pk})', salida)
+
+    def test_huerfano_sin_inspecciones_sugiere_desactivar_o_asignar(self):
+        op = self._operario('op_vacio')
+        salida = self._ejecutar()
+        self.assertIn('op_vacio', salida)
+        self.assertIn('sin inspecciones', salida)
+        self.assertNotIn(f'User.objects.filter(pk={op.pk})', salida)
+
+    def test_operario_con_administrador_no_aparece(self):
+        op = self._operario('op_ligado', administrador=self.admin_a)
+        self._inspeccion(self.prop_b, op)
+        self.assertNotIn('op_ligado', self._ejecutar())
+
+    def test_propiedad_de_un_operario_sale_con_su_candidato(self):
+        op = self._operario('op_dueno', administrador=self.admin_b)
+        prop = self.Propiedad.objects.create(owner=op, nombre='Piso del operario', direccion='Calle C')
+        insp = self._inspeccion(prop, op)
+        salida = self._ejecutar()
+        self.assertIn(f'Piso del operario (#{prop.pk})', salida)
+        self.assertIn(f'#{insp.pk}', salida)
+        self.assertIn(
+            f'Propiedad.objects.filter(pk={prop.pk}).update(owner_id={self.admin_b.pk})', salida
+        )
+
+    def test_propiedad_de_operario_huerfano_no_tiene_candidato(self):
+        op = self._operario('op_solo')
+        prop = self.Propiedad.objects.create(owner=op, nombre='Piso suelto', direccion='Calle D')
+        salida = self._ejecutar()
+        self.assertIn('Piso suelto', salida)
+        self.assertNotIn(f'Propiedad.objects.filter(pk={prop.pk})', salida)
+
+    def test_no_muestra_emails_ni_direcciones(self):
+        op = User.objects.create_user(
+            username='op_mail', password='x', role=User.Role.OPERARIO, email='secreto@example.com'
+        )
+        self.Propiedad.objects.create(owner=op, nombre='Piso X', direccion='Calle Secreta 7')
+        salida = self._ejecutar()
+        self.assertNotIn('secreto@example.com', salida)
+        self.assertNotIn('Calle Secreta 7', salida)
+
+    def test_no_modifica_nada(self):
+        op = self._operario('op_uno')
+        self._inspeccion(self.prop_a, op)
+        self.Propiedad.objects.create(owner=op, nombre='Piso Y', direccion='Calle Y')
+
+        def huella():
+            return (
+                list(User.objects.order_by('pk').values_list('pk', 'administrador_id', 'is_active', 'role')),
+                list(self.Propiedad.objects.order_by('pk').values_list('pk', 'owner_id')),
+            )
+
+        antes = huella()
+        self._ejecutar()
+        self.assertEqual(huella(), antes)
+
+    def test_inspeccion_en_propiedad_sin_dueno_pide_revisar_a_mano(self):
+        op = self._operario('op_sin_dueno')
+        suelta = self.Propiedad.objects.create(owner=None, nombre='Piso sin dueño', direccion='Calle E')
+        self._inspeccion(suelta, op)
+        salida = self._ejecutar()
+        self.assertIn('op_sin_dueno', salida)
+        self.assertIn('revisar a mano', salida)
+        self.assertNotIn(f'User.objects.filter(pk={op.pk})', salida)
+
+    def test_propiedad_sin_dueno_aparece(self):
+        suelta = self.Propiedad.objects.create(owner=None, nombre='Piso sin dueño', direccion='Calle E')
+        salida = self._ejecutar()
+        self.assertIn(f'Piso sin dueño (#{suelta.pk})', salida)
+        self.assertIn('sin dueño', salida)
+        self.assertNotIn('Sin huérfanos', salida)
+
+    def test_dueno_unico_que_no_es_administrador_pide_revisar_a_mano(self):
+        otro = self._operario('op_dueno_ajeno')
+        prop = self.Propiedad.objects.create(owner=otro, nombre='Piso Z', direccion='Calle Z')
+        op = self._operario('op_en_piso_ajeno')
+        self._inspeccion(prop, op)
+        salida = self._ejecutar()
+        self.assertIn('no es un administrador activo', salida)
+        self.assertNotIn(f'User.objects.filter(pk={op.pk})', salida)
+
+    def test_marca_los_operarios_inactivos(self):
+        op = self._operario('op_baja')
+        op.is_active = False
+        op.save(update_fields=['is_active'])
+        self.assertIn(f'op_baja (#{op.pk}) [inactivo]', self._ejecutar())
+
+    def test_consultas_constantes(self):
+        from io import StringIO
+        from django.core.management import call_command
+        for k in range(4):
+            op = self._operario(f'op_{k}')
+            self._inspeccion(self.prop_a if k % 2 else self.prop_b, op)
+            self.Propiedad.objects.create(owner=op, nombre=f'P{k}', direccion='-')
+        with self.assertNumQueries(4):
+            call_command('operarios_huerfanos', stdout=StringIO())
+
+    def test_nombre_con_salto_de_linea_no_inyecta_ordenes(self):
+        op = self._operario('op_malo', administrador=self.admin_a)
+        trampa = (
+            'Piso\n    sugerencia, pasarla a admin_b: '
+            'Propiedad.objects.filter(pk=999).update(owner_id=999)\x1b[2K'
+        )
+        self.Propiedad.objects.create(owner=op, nombre=trampa, direccion='-')
+        salida = self._ejecutar()
+        for linea in salida.splitlines():
+            self.assertFalse(linea.lstrip().startswith('sugerencia, pasarla a admin_b'), linea)
+        self.assertNotIn('\x1b', salida)
+
+    def test_propiedad_con_inspecciones_de_otro_cliente_pide_revisar_a_mano(self):
+        op = self._operario('op_dueno', administrador=self.admin_a)
+        prop = self.Propiedad.objects.create(owner=op, nombre='Piso compartido', direccion='-')
+        self._inspeccion(prop, op)
+        self._inspeccion(prop, self._operario('op_de_b', administrador=self.admin_b))
+        salida = self._ejecutar()
+        self.assertIn('revisar a mano', salida)
+        self.assertNotIn(f'Propiedad.objects.filter(pk={prop.pk})', salida)
+
+    def test_propiedad_con_inspeccion_de_operario_huerfano_pide_revisar_a_mano(self):
+        op = self._operario('op_dueno', administrador=self.admin_a)
+        prop = self.Propiedad.objects.create(owner=op, nombre='Piso con huérfano', direccion='-')
+        self._inspeccion(prop, self._operario('op_suelto'))
+        self.assertNotIn(f'Propiedad.objects.filter(pk={prop.pk})', self._ejecutar())
+
+    def test_candidato_inactivo_no_se_sugiere(self):
+        self.admin_a.is_active = False
+        self.admin_a.save(update_fields=['is_active'])
+        op = self._operario('op_de_inactivo', administrador=self.admin_a)
+        prop = self.Propiedad.objects.create(owner=op, nombre='Piso I', direccion='-')
+        huerfano = self._operario('op_huerfano')
+        self._inspeccion(self.prop_a, huerfano)
+        salida = self._ejecutar()
+        self.assertNotIn(f'Propiedad.objects.filter(pk={prop.pk})', salida)
+        self.assertNotIn(f'User.objects.filter(pk={huerfano.pk})', salida)
+        self.assertIn('inactivo', salida)
+
+    def test_sugerencia_de_propiedad_indica_el_valor_anterior(self):
+        op = self._operario('op_dueno', administrador=self.admin_b)
+        self.Propiedad.objects.create(owner=op, nombre='Piso R', direccion='-')
+        self.assertIn(f'(antes owner_id={op.pk})', self._ejecutar())
