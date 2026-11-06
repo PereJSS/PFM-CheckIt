@@ -274,11 +274,78 @@ class OperarioDetailViewTest(APITestCase):
     def _url(self, pk):
         return f'/api/v1/usuarios/operarios/{pk}/'
 
-    def test_admin_deletes_operario(self):
+    # --- Dar de baja (6 nov): la cuenta se desactiva, no se borra ---
+
+    def test_admin_da_de_baja_al_operario_sin_borrarlo(self):
         self.client.force_authenticate(user=self.admin)
         response = self.client.delete(self._url(self.operario.pk))
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(User.objects.filter(pk=self.operario.pk).exists())
+        self.operario.refresh_from_db()
+        self.assertFalse(self.operario.is_active)
+        self.assertEqual(self.operario.administrador, self.admin)
+
+    def test_sus_inspecciones_conservan_el_operario(self):
+        from inspecciones.models import Inspeccion
+        from propiedades.models import Propiedad
+        prop = Propiedad.objects.create(owner=self.admin, nombre='P', direccion='C')
+        insp = Inspeccion.objects.create(propiedad=prop, operario=self.operario)
+        self.client.force_authenticate(user=self.admin)
+        self.client.delete(self._url(self.operario.pk))
+        insp.refresh_from_db()
+        self.assertEqual(insp.operario_id, self.operario.pk)
+
+    def test_el_dado_de_baja_no_sale_en_la_lista_y_un_segundo_delete_da_404(self):
+        self.client.force_authenticate(user=self.admin)
+        self.client.delete(self._url(self.operario.pk))
+        lista = self.client.get('/api/v1/usuarios/operarios/')
+        self.assertEqual([o['id'] for o in lista.data], [])
+        self.assertEqual(self.client.delete(self._url(self.operario.pk)).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_el_dado_de_baja_no_inicia_sesion_ni_usa_su_token(self):
+        login = self.client.post(
+            '/api/v1/auth/login/', {'username': 'op1', 'password': 'Pass1234!'}, format='json'
+        )
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+        acceso, refresco = login.data['access'], login.data['refresh']
+        self.client.force_authenticate(user=self.admin)
+        self.client.delete(self._url(self.operario.pk))
+        self.client.force_authenticate(user=None)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {acceso}')
+        self.assertEqual(self.client.get('/api/v1/auth/me/').status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.credentials()
+        self.assertEqual(
+            self.client.post('/api/v1/auth/refresh/', {'refresh': refresco}, format='json').status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+        self.assertEqual(
+            self.client.post(
+                '/api/v1/auth/login/', {'username': 'op1', 'password': 'Pass1234!'}, format='json'
+            ).status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_un_usuario_activo_sigue_refrescando_su_token(self):
+        login = self.client.post(
+            '/api/v1/auth/login/', {'username': 'op1', 'password': 'Pass1234!'}, format='json'
+        )
+        respuesta = self.client.post('/api/v1/auth/refresh/', {'refresh': login.data['refresh']}, format='json')
+        self.assertEqual(respuesta.status_code, status.HTTP_200_OK)
+        self.assertIn('access', respuesta.data)
+
+    def test_un_refresh_invalido_da_401(self):
+        respuesta = self.client.post('/api/v1/auth/refresh/', {'refresh': 'no-es-un-token'}, format='json')
+        self.assertEqual(respuesta.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_no_da_de_baja_al_operario_de_otro_cliente(self):
+        otro = User.objects.create_user(username='adm_otro', password='x', role=User.Role.ADMIN)
+        ajeno = User.objects.create_user(
+            username='op_ajeno', password='x', role=User.Role.OPERARIO, administrador=otro
+        )
+        self.client.force_authenticate(user=self.admin)
+        self.assertEqual(self.client.delete(self._url(ajeno.pk)).status_code, status.HTTP_404_NOT_FOUND)
+        ajeno.refresh_from_db()
+        self.assertTrue(ajeno.is_active)
 
     def test_operario_cannot_delete(self):
         self.client.force_authenticate(user=self.operario)

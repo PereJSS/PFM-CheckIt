@@ -358,9 +358,14 @@ export default function AdminPage() {
     }
   };
 
-  // Elimina operario tras confirmación y recarga listado.
+  // Da de baja al operario tras confirmación (no se borra: su nombre sigue en sus inspecciones).
   const handleDeleteOp = async (id) => {
-    if (!window.confirm("¿Eliminar este operario?")) return;
+    if (
+      !window.confirm(
+        "¿Dar de baja a este operario? No podrá entrar, y su nombre se conserva en las inspecciones que hizo.",
+      )
+    )
+      return;
     await api.delete(`/usuarios/operarios/${id}/`);
     api.get("/usuarios/operarios/").then((res) => setOperarios(res.data));
   };
@@ -992,7 +997,7 @@ export default function AdminPage() {
                             onClick={() => handleDeleteOp(o.id)}
                             className="text-xs text-red-500 hover:underline font-medium"
                           >
-                            Eliminar
+                            Dar de baja
                           </button>
                         </td>
                       </tr>

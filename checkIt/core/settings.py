@@ -244,6 +244,8 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=8), 
     'REFRESH_TOKEN_LIFETIME': timedelta(days=5),
     'AUTH_HEADER_TYPES': ('Bearer',),
+    # Un usuario dado de baja no refresca su token (la versión 5.3 no lo comprueba)
+    'TOKEN_REFRESH_SERIALIZER': 'users.serializers.RefrescoUsuarioActivoSerializer',
 }
 
 # URL pública del backend: base de los enlaces absolutos que salen en los webhooks

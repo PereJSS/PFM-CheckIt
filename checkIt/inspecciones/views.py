@@ -186,9 +186,10 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not operario or not _es_operario_de(operario, usuario):
+        # Uno dado de baja no puede entrar a hacerla
+        if not operario or not _es_operario_de(operario, usuario) or not operario.is_active:
             return Response(
-                {"error": "La inspección debe asignarse a uno de tus operarios."},
+                {"error": "La inspección debe asignarse a uno de tus operarios en activo."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -220,6 +221,12 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 if _operario_ajeno(nuevo_operario, usuario):
                     return Response(
                         {"error": "El usuario asignado debe ser uno de tus operarios."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # Reenviar el que ya tenía (aunque esté de baja) no asigna nada nuevo
+                if nuevo_operario and nuevo_operario.pk != inspeccion.operario_id and not nuevo_operario.is_active:
+                    return Response(
+                        {"error": "Ese operario está dado de baja: asígnala a uno en activo."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
             elif _operario_ajeno(inspeccion.operario, usuario):

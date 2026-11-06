@@ -1,6 +1,23 @@
+from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
+from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
+from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
+
+
+# SimpleJWT 5.3 refresca sin mirar al usuario: un operario dado de baja (o borrado) seguiría
+# obteniendo tokens de acceso durante los 5 días del refresh. Mismo nombre en OpenAPI que el original
+@extend_schema_serializer(component_name='TokenRefresh')
+class RefrescoUsuarioActivoSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        token = RefreshToken(attrs['refresh'])
+        user_id = token.get(jwt_settings.USER_ID_CLAIM)
+        if not User.objects.filter(**{jwt_settings.USER_ID_FIELD: user_id, 'is_active': True}).exists():
+            raise InvalidToken('El usuario no existe o está dado de baja.')
+        return super().validate(attrs)
 
 
 class AdminRegisterSerializer(serializers.ModelSerializer):

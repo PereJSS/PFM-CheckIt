@@ -61,7 +61,7 @@ class OperariosView(APIView):
             return Response({"error": "Sin permisos."}, status=403)
         # Solo los suyos: los de otros clientes no se ven (ni sus emails)
         operarios = User.objects.filter(
-            role=User.Role.OPERARIO, administrador=request.user,
+            role=User.Role.OPERARIO, administrador=request.user, is_active=True,
         ).order_by("first_name", "username")
         data = [
             {
@@ -89,7 +89,7 @@ class OperariosView(APIView):
 
 
 class OperarioDetailView(APIView):
-    """Elimina un operario. Solo accesible para admins."""
+    """Da de baja a un operario (lo desactiva, no lo borra). Solo accesible para admins."""
     permission_classes = [IsAuthenticated]
 
     @extend_schema(request=None, responses={204: None})
@@ -98,8 +98,13 @@ class OperarioDetailView(APIView):
             return Response({"error": "Sin permisos."}, status=403)
         try:
             # Uno ajeno da 404 como uno inexistente: no se revela que existe
-            user = User.objects.get(pk=pk, role=User.Role.OPERARIO, administrador=request.user)
+            user = User.objects.get(
+                pk=pk, role=User.Role.OPERARIO, administrador=request.user, is_active=True,
+            )
         except User.DoesNotExist:
             return Response({"error": "Operario no encontrado."}, status=404)
-        user.delete()
+        # Baja, no borrado: sus inspecciones conservan quién las hizo (PDF y paquete probatorio).
+        # Inactivo no inicia sesión, sus tokens dejan de valer y no puede refrescarlos
+        user.is_active = False
+        user.save(update_fields=['is_active'])
         return Response(status=status.HTTP_204_NO_CONTENT)

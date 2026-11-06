@@ -153,6 +153,34 @@ class InspeccionViewSetTest(APITestCase):
         response = self.client.post(self.URL, {'propiedad': self.prop1.pk, 'operario': huerfano.pk})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    # --- Operarios dados de baja (6 nov): no se les asigna nada nuevo ---
+
+    def _baja(self, operario):
+        User.objects.filter(pk=operario.pk).update(is_active=False)
+
+    def test_no_se_crea_una_inspeccion_para_un_operario_dado_de_baja(self):
+        self._baja(self.op1)
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.post(self.URL, {'propiedad': self.prop1.pk, 'operario': self.op1.pk}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_no_se_reasigna_a_un_operario_dado_de_baja(self):
+        otro = User.objects.create_user(
+            username='op1b', password='x', role=User.Role.OPERARIO, administrador=self.admin1, is_active=False
+        )
+        self.client.force_authenticate(user=self.admin1)
+        response = self.client.patch(f'{self.URL}{self.insp1.pk}/', {'operario': otro.pk}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.insp1.refresh_from_db()
+        self.assertEqual(self.insp1.operario, self.op1)
+
+    def test_la_inspeccion_de_un_operario_dado_de_baja_sigue_editable(self):
+        self._baja(self.op1)
+        self.client.force_authenticate(user=self.admin1)
+        url = f'{self.URL}{self.insp1.pk}/'
+        self.assertEqual(self.client.patch(url, {'estado': 'EN_PROGRESO'}, format='json').status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.patch(url, {'operario': self.op1.pk}, format='json').status_code, status.HTTP_200_OK)
+
     # --- Inspecciones cruzadas (datos anteriores al 5 nov): hay que reasignarlas para editarlas ---
 
     def _cruzada(self, operario):
