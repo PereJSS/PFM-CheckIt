@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 
@@ -24,9 +25,32 @@ class User(AbstractUser):
         null=True,
         blank=True,
         related_name='operarios',
-        limit_choices_to={'role': 'ADMINISTRADOR'},
         verbose_name="Administrador del operario",
     )
+
+    class Meta(AbstractUser.Meta):
+        constraints = [
+            # Regla de una fila: la BD la garantiza también ante un update() en la Shell. Que el
+            # apuntado sea un administrador compara dos filas: solo lo comprueba clean()
+            models.CheckConstraint(
+                check=(
+                    models.Q(administrador__isnull=True)
+                    | (models.Q(role='OPERARIO') & ~models.Q(administrador=models.F('id')))
+                ),
+                name='users_administrador_solo_en_operarios',
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.administrador_id is None:
+            return
+        if self.role != self.Role.OPERARIO:
+            raise ValidationError({'administrador': 'Solo un operario tiene administrador.'})
+        if self.pk is not None and self.administrador_id == self.pk:
+            raise ValidationError({'administrador': 'Un operario no puede ser su propio administrador.'})
+        if self.administrador.role != self.Role.ADMIN:
+            raise ValidationError({'administrador': 'El administrador debe ser un usuario administrador.'})
 
     def is_admin(self):
         role = (self.role or "").strip().upper()

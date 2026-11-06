@@ -580,3 +580,63 @@ class OperariosHuerfanosCommandTest(TestCase):
     def test_inspeccion_de_operario_huerfano_no_se_repite_como_cruzada(self):
         self._inspeccion(self.prop_a, self._operario('op_suelto'))
         self.assertNotIn('Inspecciones con un operario de otro cliente', self._ejecutar())
+
+
+class AdministradorSoloEnOperariosTest(TestCase):
+    """`administrador` solo lo tiene un operario, nunca él mismo, y apunta a un administrador."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username='adm', password='x', role=User.Role.ADMIN)
+        self.op = User.objects.create_user(
+            username='op', password='x', role=User.Role.OPERARIO, administrador=self.admin
+        )
+
+    def _rechaza_bd(self, pk, **cambios):
+        from django.db import IntegrityError, transaction
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            User.objects.filter(pk=pk).update(**cambios)
+
+    def _errores_administrador(self, usuario):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError) as ctx:
+            usuario.full_clean()
+        return ctx.exception.message_dict['administrador']
+
+    def test_bd_rechaza_un_administrador_con_administrador(self):
+        otro = User.objects.create_user(username='adm2', password='x', role=User.Role.ADMIN)
+        self._rechaza_bd(pk=otro.pk, administrador=self.admin)
+
+    def test_bd_rechaza_un_operario_que_se_apunta_a_si_mismo(self):
+        self._rechaza_bd(pk=self.op.pk, administrador=self.op)
+
+    def test_bd_rechaza_quitar_el_rol_de_operario_si_tiene_administrador(self):
+        self._rechaza_bd(pk=self.op.pk, role=User.Role.ADMIN)
+
+    def test_clean_rechaza_apuntar_a_otro_operario_con_un_mensaje_claro(self):
+        otro = User.objects.create_user(username='op2', password='x', role=User.Role.OPERARIO)
+        self.op.administrador = otro
+        self.assertEqual(
+            self._errores_administrador(self.op), ['El administrador debe ser un usuario administrador.']
+        )
+
+    def test_clean_rechaza_apuntarse_a_si_mismo_con_un_solo_mensaje(self):
+        self.op.administrador = self.op
+        self.assertEqual(
+            self._errores_administrador(self.op), ['Un operario no puede ser su propio administrador.']
+        )
+
+    def test_borrar_un_administrador_suelta_a_sus_operarios(self):
+        self.admin.delete()
+        self.op.refresh_from_db()
+        self.assertIsNone(self.op.administrador)
+
+    def test_clean_rechaza_un_administrador_con_administrador(self):
+        otro = User.objects.create_user(username='adm2', password='x', role=User.Role.ADMIN)
+        otro.administrador = self.admin
+        self.assertEqual(self._errores_administrador(otro), ['Solo un operario tiene administrador.'])
+
+    def test_lo_valido_sigue_pasando(self):
+        self.op.full_clean()
+        suelto = User.objects.create_user(username='op_suelto', password='x', role=User.Role.OPERARIO)
+        suelto.full_clean()
+        self.admin.full_clean()
