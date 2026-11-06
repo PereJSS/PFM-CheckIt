@@ -425,7 +425,7 @@ class OperariosHuerfanosCommandTest(TestCase):
 
     def test_operario_con_administrador_no_aparece(self):
         op = self._operario('op_ligado', administrador=self.admin_a)
-        self._inspeccion(self.prop_b, op)
+        self._inspeccion(self.prop_a, op)
         self.assertNotIn('op_ligado', self._ejecutar())
 
     def test_propiedad_de_un_operario_sale_con_su_candidato(self):
@@ -508,7 +508,9 @@ class OperariosHuerfanosCommandTest(TestCase):
             op = self._operario(f'op_{k}')
             self._inspeccion(self.prop_a if k % 2 else self.prop_b, op)
             self.Propiedad.objects.create(owner=op, nombre=f'P{k}', direccion='-')
-        with self.assertNumQueries(4):
+            op_b = self._operario(f'op_b_{k}', administrador=self.admin_b)
+            self._inspeccion(self.prop_a, op_b)
+        with self.assertNumQueries(5):
             call_command('operarios_huerfanos', stdout=StringIO())
 
     def test_nombre_con_salto_de_linea_no_inyecta_ordenes(self):
@@ -554,3 +556,27 @@ class OperariosHuerfanosCommandTest(TestCase):
         op = self._operario('op_dueno', administrador=self.admin_b)
         self.Propiedad.objects.create(owner=op, nombre='Piso R', direccion='-')
         self.assertIn(f'(antes owner_id={op.pk})', self._ejecutar())
+
+    def test_inspeccion_con_operario_de_otro_cliente_aparece(self):
+        op_b = self._operario('op_de_b', administrador=self.admin_b)
+        cruzada = self._inspeccion(self.prop_a, op_b)
+        salida = self._ejecutar()
+        self.assertIn('Inspecciones con un operario de otro cliente:', salida)
+        self.assertIn(f'#{cruzada.pk} en Piso A (#{self.prop_a.pk}) de admin_a', salida)
+        self.assertIn(f'op_de_b (#{op_b.pk}), de admin_b', salida)
+        self.assertIn('Reasignarla en /admin/ de Django a un operario de admin_a', salida)
+        self.assertNotIn('Sin huérfanos', salida)
+
+    def test_inspeccion_con_un_administrador_como_operario_aparece(self):
+        cruzada = self._inspeccion(self.prop_a, self.admin_b)
+        self.assertIn(f'#{cruzada.pk} en Piso A', self._ejecutar())
+
+    def test_inspeccion_bien_asignada_no_aparece_como_cruzada(self):
+        self._inspeccion(self.prop_a, self._operario('op_de_a', administrador=self.admin_a))
+        salida = self._ejecutar()
+        self.assertNotIn('otro cliente:', salida)
+        self.assertIn('Sin huérfanos', salida)
+
+    def test_inspeccion_de_operario_huerfano_no_se_repite_como_cruzada(self):
+        self._inspeccion(self.prop_a, self._operario('op_suelto'))
+        self.assertNotIn('Inspecciones con un operario de otro cliente', self._ejecutar())

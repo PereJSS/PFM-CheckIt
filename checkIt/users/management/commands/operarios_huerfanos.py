@@ -3,6 +3,9 @@
 1. Operarios sin administrador: ningún cliente puede verlos ni asignarlos.
 2. Propiedades sin dueño o cuyo dueño es un operario (creadas antes de exigir IsAdmin): no las ve
    ningún administrador.
+3. Inspecciones con un operario de otro cliente: ese operario sigue viéndolas, y la API no deja
+   editarlas hasta reasignarlas. Se reasignan en /admin/ de Django (guardar pasa por las
+   señales); la app del cliente aún no tiene pantalla para reasignar.
 
 Solo lee. Imprime la orden sugerida para la Shell cuando no hay duda (la misma regla que
 la migración users/0003: un único dueño, y que sea un administrador activo); si la hay, pide
@@ -14,7 +17,7 @@ que un salto de línea no fabrique una «sugerencia» falsa que luego se copie e
 import unicodedata
 
 from django.core.management.base import BaseCommand
-from django.db.models import Prefetch, Q
+from django.db.models import F, Prefetch, Q
 
 from inspecciones.models import Inspeccion
 from propiedades.models import Propiedad
@@ -53,12 +56,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         n_operarios = self._operarios_sin_administrador()
         n_propiedades = self._propiedades_de_operarios()
-        if n_operarios == 0 and n_propiedades == 0:
+        n_cruzadas = self._inspecciones_cruzadas()
+        if n_operarios == 0 and n_propiedades == 0 and n_cruzadas == 0:
             self.stdout.write('Sin huérfanos.')
             return
         self.stdout.write(
             f'\nResumen: {n_operarios} operario(s) sin administrador, '
-            f'{n_propiedades} propiedad(es) sin dueño o de operarios.\n'
+            f'{n_propiedades} propiedad(es) sin dueño o de operarios, '
+            f'{n_cruzadas} inspección(es) con operario de otro cliente.\n'
             'Las órdenes, una a una y tras revisarlas, en `manage.py shell` con '
             '`from users.models import User; from propiedades.models import Propiedad`.'
         )
@@ -158,5 +163,33 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'    sugerencia, pasarla a {_usuario(candidato)} (antes owner_id={operario.pk}): '
                 f'Propiedad.objects.filter(pk={propiedad.pk}).update(owner_id={candidato.pk})'
+            )
+        return total
+
+    def _inspecciones_cruzadas(self):
+        # Los operarios sin administrador ya salen en la primera lista, con sus inspecciones
+        cruzadas = (
+            Inspeccion.objects.filter(operario__isnull=False, propiedad__owner__isnull=False)
+            .filter(
+                ~Q(operario__role=User.Role.OPERARIO)
+                | (Q(operario__administrador__isnull=False) & ~Q(operario__administrador=F('propiedad__owner')))
+            )
+            .select_related('propiedad__owner', 'operario__administrador')
+            .order_by('pk')
+        )
+        total = 0
+        for inspeccion in cruzadas:
+            if total == 0:
+                self.stdout.write('Inspecciones con un operario de otro cliente:')
+            total += 1
+            propiedad, operario = inspeccion.propiedad, inspeccion.operario
+            de_quien = (
+                f'de {_usuario(operario.administrador)}' if operario.administrador
+                else f'con rol {_texto(operario.role)}'
+            )
+            self.stdout.write(
+                f'- #{inspeccion.pk} en {_texto(propiedad.nombre)} (#{propiedad.pk}) de '
+                f'{_usuario(propiedad.owner)}: operario {_usuario(operario)}, {de_quien}. '
+                f'Reasignarla en /admin/ de Django a un operario de {_usuario(propiedad.owner)}.'
             )
         return total

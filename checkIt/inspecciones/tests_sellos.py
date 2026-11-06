@@ -350,7 +350,9 @@ class MerkleTest(TestCase):
 class _ConInspeccion:
     def _crear_inspeccion(self):
         self.admin = User.objects.create_user(username='admin_m', password='Pass1234!', role=User.Role.ADMIN)
-        self.operario = User.objects.create_user(username='op_m', password='Pass1234!', role=User.Role.OPERARIO)
+        self.operario = User.objects.create_user(
+            username='op_m', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin
+        )
         prop = Propiedad.objects.create(owner=self.admin, nombre='P', direccion='C')
         self.inspeccion = Inspeccion.objects.create(propiedad=prop, operario=self.operario)
 

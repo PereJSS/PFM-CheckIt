@@ -153,12 +153,58 @@ class InspeccionViewSetTest(APITestCase):
         response = self.client.post(self.URL, {'propiedad': self.prop1.pk, 'operario': huerfano.pk})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_reenviar_el_mismo_operario_anterior_no_bloquea_la_edicion(self):
-        """Una inspección de antes del arreglo con un operario sin administrador sigue editable."""
-        huerfano = User.objects.create_user(username='huerfano', password='x', role=User.Role.OPERARIO)
-        Inspeccion.objects.filter(pk=self.insp1.pk).update(operario=huerfano)
+    # --- Inspecciones cruzadas (datos anteriores al 5 nov): hay que reasignarlas para editarlas ---
+
+    def _cruzada(self, operario):
+        Inspeccion.objects.filter(pk=self.insp1.pk).update(operario=operario)
         self.client.force_authenticate(user=self.admin1)
-        response = self.client.patch(f'{self.URL}{self.insp1.pk}/', {'operario': huerfano.pk})
+        return f'{self.URL}{self.insp1.pk}/'
+
+    def test_reenviar_el_mismo_operario_sin_administrador_da_400(self):
+        huerfano = User.objects.create_user(username='huerfano', password='x', role=User.Role.OPERARIO)
+        url = self._cruzada(huerfano)
+        response = self.client.patch(url, {'operario': huerfano.pk}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_editar_una_inspeccion_con_operario_de_otro_cliente_da_400(self):
+        url = self._cruzada(self.op2)
+        response = self.client.patch(url, {'estado': 'EN_PROGRESO'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('reasígnala', response.data['error'])
+        self.insp1.refresh_from_db()
+        self.assertEqual(self.insp1.estado, Inspeccion.Estado.PENDIENTE)
+        self.assertEqual(self.insp1.operario, self.op2)
+
+    def test_put_con_operario_de_otro_cliente_tambien_da_400(self):
+        url = self._cruzada(self.op2)
+        response = self.client.put(url, {'propiedad': self.prop1.pk, 'operario': self.op2.pk}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reasignar_a_un_operario_propio_arregla_la_cruzada(self):
+        url = self._cruzada(self.op2)
+        response = self.client.patch(url, {'operario': self.op1.pk, 'estado': 'EN_PROGRESO'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.insp1.refresh_from_db()
+        self.assertEqual(self.insp1.operario, self.op1)
+        self.assertEqual(self.insp1.estado, Inspeccion.Estado.EN_PROGRESO)
+
+    def test_quitar_el_operario_ajeno_esta_permitido(self):
+        url = self._cruzada(self.op2)
+        response = self.client.patch(url, {'operario': None}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.insp1.refresh_from_db()
+        self.assertIsNone(self.insp1.operario)
+
+    def test_inspeccion_sin_operario_sigue_editable(self):
+        """Las que crea un PMS llegan sin operario: el administrador las asigna después."""
+        url = self._cruzada(None)
+        response = self.client.patch(url, {'estado': 'EN_PROGRESO'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_el_operario_ajeno_aun_puede_completarla(self):
+        Inspeccion.objects.filter(pk=self.insp1.pk).update(operario=self.op2)
+        self.client.force_authenticate(user=self.op2)
+        response = self.client.patch(f'{self.URL}{self.insp1.pk}/', {'estado': 'COMPLETADA'}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     # --- List ---
@@ -255,7 +301,7 @@ class UploadEvidenceTest(APITestCase):
             username='admin', password='Pass1234!', role=User.Role.ADMIN
         )
         self.op = User.objects.create_user(
-            username='op', password='Pass1234!', role=User.Role.OPERARIO
+            username='op', password='Pass1234!', role=User.Role.OPERARIO, administrador=self.admin
         )
         self.other_op = User.objects.create_user(
             username='op2', password='Pass1234!', role=User.Role.OPERARIO
@@ -267,6 +313,28 @@ class UploadEvidenceTest(APITestCase):
 
     def _url(self, pk):
         return f'/api/v1/inspecciones/{pk}/evidencias/'
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_admin_dueno_sube_a_una_inspeccion_de_su_operario(self, _mock_tsa):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(self._url(self.insp.pk), {'foto': _make_image()}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_admin_no_sube_a_una_cruzada_sin_reasignarla(self, _mock_tsa):
+        Inspeccion.objects.filter(pk=self.insp.pk).update(operario=self.other_op)
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(self._url(self.insp.pk), {'foto': _make_image()}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('reasígnala', response.data['error'])
+        self.assertEqual(Evidencia.objects.count(), 0)
+
+    @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
+    def test_el_operario_de_una_cruzada_aun_sube_fotos(self, _mock_tsa):
+        Inspeccion.objects.filter(pk=self.insp.pk).update(operario=self.other_op)
+        self.client.force_authenticate(user=self.other_op)
+        response = self.client.post(self._url(self.insp.pk), {'foto': _make_image()}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     @patch('inspecciones.views.solicitar_sello_tiempo', return_value=None)
     def test_assigned_operario_uploads_evidence(self, _mock_tsa):

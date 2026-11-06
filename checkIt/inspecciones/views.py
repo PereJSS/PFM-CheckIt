@@ -60,6 +60,15 @@ def _es_operario_de(usuario, administrador):
     return _is_operario_user(usuario) and usuario.administrador_id == administrador.pk
 
 
+# Datos de antes del 5 nov: un operario de otro cliente (o sin administrador) sigue viendo la
+# inspección. El administrador no la modifica hasta reasignarla a uno propio o quitarlo.
+ERROR_OPERARIO_AJENO = "El operario asignado no es uno de tus operarios: reasígnala o quítalo para editarla."
+
+
+def _operario_ajeno(operario, administrador):
+    return operario is not None and not _es_operario_de(operario, administrador)
+
+
 def _validate_evidence_file(foto):
     if not foto:
         return "El campo 'foto' es obligatorio."
@@ -205,17 +214,16 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            nuevo_operario = serializer.validated_data.get('operario')
-            # Reenviar el operario que ya tiene no da ningún acceso nuevo (p. ej. uno anterior sin administrador)
-            if (
-                nuevo_operario
-                and nuevo_operario.pk != inspeccion.operario_id
-                and not _es_operario_de(nuevo_operario, usuario)
-            ):
-                return Response(
-                    {"error": "El usuario asignado debe ser uno de tus operarios."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            if 'operario' in serializer.validated_data:
+                # Asignar uno ajeno (o reenviar el ajeno que ya tenía): no da acceso a nadie más
+                nuevo_operario = serializer.validated_data['operario']
+                if _operario_ajeno(nuevo_operario, usuario):
+                    return Response(
+                        {"error": "El usuario asignado debe ser uno de tus operarios."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif _operario_ajeno(inspeccion.operario, usuario):
+                return Response({"error": ERROR_OPERARIO_AJENO}, status=status.HTTP_400_BAD_REQUEST)
 
             self.perform_update(serializer)
             return Response(serializer.data)
@@ -421,6 +429,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 {"error": "No tienes permisos para añadir evidencias a esta inspección."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # El operario asignado sí sube fotos (igual que puede completarla); el admin, solo tras reasignarla
+        if inspeccion.operario_id != usuario.pk and _operario_ajeno(inspeccion.operario, usuario):
+            return Response({"error": ERROR_OPERARIO_AJENO}, status=status.HTTP_400_BAD_REQUEST)
 
         # El manifiesto Merkle se congela al completar: no se admiten evidencias nuevas
         if inspeccion.estado == Inspeccion.Estado.COMPLETADA:
