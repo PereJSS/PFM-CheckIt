@@ -47,7 +47,8 @@ checkIt/
 │   ├── generar_certs.py     # script para crear certificado local de firma
 │   ├── seed_demo.py         # script de carga de datos demo
 │   ├── manage.py
-│   └── requirements.txt
+│   ├── requirements.in      # dependencias directas (se editan aquí)
+│   └── requirements.txt     # lock generado con uv: todo fijado y con hashes (lo instalan Render y el CI)
 ├── frontend/
 │   ├── src/
 │   │   ├── pages/           # login, register, admin, inspeccion
@@ -107,6 +108,10 @@ La sesión de frontend usa sessionStorage (no localStorage):
 python3 -m venv .venv          # o, sin Python 3.10+ en el sistema: uv venv --python 3.11 .venv
 source .venv/bin/activate
 pip install -r checkIt/requirements.txt
+# requirements.txt es un lock con hashes generado desde requirements.in.
+# Para añadir o cambiar una dependencia: editar requirements.in y, desde checkIt/,
+#   uv pip compile requirements.in --universal --python-version 3.10 --generate-hashes -o requirements.txt
+# (conserva las versiones ya fijadas; --upgrade-package <paquete> para subir una)
 
 cd checkIt
 python manage.py migrate

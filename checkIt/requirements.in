@@ -1,0 +1,35 @@
+# Dependencias DIRECTAS. No es lo que instalan Render ni el CI: ellos usan
+# requirements.txt, generado desde aquí con todo fijado y con hashes.
+# Tras cambiar este archivo, regenerar desde checkIt/ con:
+#   uv pip compile requirements.in --universal --python-version 3.10 --generate-hashes -o requirements.txt
+# (--universal: un solo lock para 3.10 y 3.13 del CI y 3.11 de Render)
+# uv conserva las versiones ya fijadas en requirements.txt; para subir una a
+# propósito, añadir --upgrade-package <paquete>.
+asgiref==3.8.1
+backports.zoneinfo==0.2.1; python_version < "3.9"
+django==4.2.30
+django-cors-headers==4.4.0
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.3.1
+reportlab==4.2.2
+# Dependencia de reportlab; requests 2.32 solo admite chardet < 6 (si no, RequestsDependencyWarning)
+chardet==5.2.0
+pillow==10.4.0
+pyhanko==0.27.1
+psycopg[binary]==3.3.4
+PyJWT==2.9.0
+python-decouple==3.8
+rfc3161ng==2.1.3
+requests==2.32.4
+urllib3==2.2.3
+sqlparse==0.5.5
+typing-extensions==4.13.2
+gunicorn==23.0.0
+packaging==26.2
+celery==5.3.6
+kombu==5.6.2
+redis==5.0.1
+drf-spectacular==0.27.2
+# Fotos y PDF en un bucket S3 compatible (Cloudflare R2) si hay AWS_STORAGE_BUCKET_NAME
+django-storages[s3]==1.14.6
+boto3==1.43.114
