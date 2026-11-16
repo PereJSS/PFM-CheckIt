@@ -522,12 +522,22 @@ Configuración actual de producción (servicio web con *Root Directory* `checkIt
 | Ajuste | Valor |
 |---|---|
 | Pre-Deploy Command | incluye `python manage.py migrate` |
-| Start Command | `celery -A core worker -B --pool=solo --loglevel=info & gunicorn core.wsgi` |
+| Start Command | `bash start.sh` (Celery con beat y gunicorn; ver abajo) |
+| Health Check Path | `/healthz` |
 | `PYTHON_VERSION` | `3.11.9` (también fijado en `checkIt/.python-version`; la variable tiene prioridad) |
 | `REDIS_URL` | *Internal URL* de un **Key Value** de Render (plan gratuito, misma región que el web) |
 | `NUM_PROXIES` | `2` |
 
-Celery (con beat embebido, `-B`) corre **dentro del servicio web** porque los Background Workers de Render no tienen plan gratuito. `--pool=solo` usa un único proceso para no agotar los 512 MB. Limitaciones: comparte memoria con gunicorn, se duerme con el servicio web en el plan gratuito y, si Celery se cae, nadie lo reinicia hasta el siguiente deploy. Con clientes reales, mover Celery a un **Background Worker** (mismo Build Command y variables, Start Command `celery -A core worker -B --loglevel=info`, **una sola instancia** para no duplicar beat) y dejar el web en `gunicorn core.wsgi`.
+Celery (con beat embebido, `-B`) corre **dentro del servicio web** porque los Background Workers de Render no tienen plan gratuito. `--pool=solo` usa un único proceso para no agotar los 512 MB. Limitaciones: comparte memoria con gunicorn y se duerme con el servicio web en el plan gratuito.
+
+**Si Celery se cae** (como el 4 nov, cuando `kombu` 5.7.0 lo tumbó y la web siguió «live»):
+
+- `checkIt/start.sh` arranca Celery y **espera a que avise de que está listo** (señal `worker_ready`) antes de arrancar gunicorn. Si Celery muere antes (el caso de `kombu`), sale con error sin abrir el puerto: en un deploy, Render lo da por fallido y **mantiene la versión anterior**. Si solo tarda (Redis caído y Celery reintentando), tras `CHECKIT_ESPERA_CELERY_SEG` (60 s) arranca la web igualmente y lo deja en el log: la web no queda como rehén de Redis.
+- Ya en marcha, si **cualquiera** de los dos termina, para el otro y sale con error: Render reinicia la instancia. Reenvía `SIGTERM` para el apagado normal. Si muriera solo el beat (va dentro del worker con `-B`), el script no lo vería: lo cubre el latido.
+- `GET /healthz` (Health Check Path) solo dice que Django responde: no mira la BD ni Celery, porque con una sola instancia un fallo de esos sacaría la web entera del tráfico y la reiniciaría en bucle. Responde aunque el Host no esté en `ALLOWED_HOSTS`.
+- `GET /healthz/celery` cubre lo que no muere (worker colgado, broker perdido): el beat lanza la tarea `core.latido` cada `SALUD_LATIDO_SEG` (120 s) y la tarea comprueba antes la conexión a la BD, y la ruta da **503** si el último latido tiene más de `SALUD_LATIDO_MAX_SEG` (600 s: con `--pool=solo` un PDF de hasta 300 s retrasa el latido; nunca menos de dos latidos), si no hay ninguno o si Redis no responde (la caché tiene timeout de socket de 2 s, como el broker). Respuesta: `{"celery": "ok" | "atrasado" | "sin_latido" | "cache_no_responde", "segundos_desde_latido": n}`. **Un monitor externo** (UptimeRobot, Better Stack…) la consulta cada 5 min y avisa por correo: es la única pieza que avisa; las otras dos se recuperan solas.
+
+Las dos rutas las sirve `core.salud.SaludMiddleware`, el primero de la lista: sin autenticación, sin throttle (que también usa Redis), fuera de OpenAPI y con `Cache-Control: no-store` y `nosniff`. En local sin `REDIS_URL` la caché es de memoria por proceso: la web no ve el latido del worker y `/healthz/celery` da siempre `sin_latido`. Con clientes reales, mover Celery a un **Background Worker** (mismo Build Command y variables, Start Command `celery -A core worker -B --loglevel=info`, **una sola instancia** para no duplicar beat) y dejar el web en `gunicorn core.wsgi`.
 
 ---
 

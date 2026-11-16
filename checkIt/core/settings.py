@@ -58,6 +58,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Primero: /healthz y /healthz/celery responden antes de validar el Host (Render llama
+    # con la IP interna) y sin sesiones ni CORS. Ver core/salud.py
+    'core.salud.SaludMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -287,7 +290,17 @@ TSA_RESELLO_BATCH_SIZE = config('TSA_RESELLO_BATCH_SIZE', default=20, cast=int)
 TSA_RESELLO_MAX_FALLOS = config('TSA_RESELLO_MAX_FALLOS', default=3, cast=int)
 TSA_RESELLO_PAUSA_SEG = config('TSA_RESELLO_PAUSA_SEG', default=1.0, cast=float)
 TSA_RESELLO_INTERVALO_MIN = config('TSA_RESELLO_INTERVALO_MIN', default=10, cast=int)
+# Latido de Celery para /healthz/celery: el beat lo programa cada SALUD_LATIDO_SEG y la ruta
+# da 503 si el último tiene más de SALUD_LATIDO_MAX_SEG. Con --pool=solo una tarea larga (PDF,
+# hasta 300 s) retrasa el latido: 600 s lo absorben. Nunca menos de dos latidos, o oscilaría.
+SALUD_LATIDO_SEG = config('SALUD_LATIDO_SEG', default=120, cast=int)
+SALUD_LATIDO_MAX_SEG = max(config('SALUD_LATIDO_MAX_SEG', default=600, cast=int), 2 * SALUD_LATIDO_SEG)
 CELERY_BEAT_SCHEDULE = {
+    'latido-celery': {
+        'task': 'core.latido',
+        'schedule': float(SALUD_LATIDO_SEG),
+        'options': {'expires': SALUD_LATIDO_SEG},
+    },
     'resellar-evidencias-pendientes': {
         'task': 'inspecciones.tasks.resellar_evidencias_pendientes',
         'schedule': max(TSA_RESELLO_INTERVALO_MIN, 1) * 60.0,
@@ -323,6 +336,9 @@ if _REDIS_CACHE_URL:
             'LOCATION': _REDIS_CACHE_URL,
             'KEY_PREFIX': 'checkit',
             'TIMEOUT': 300,
+            # Sin esto, un Redis que acepta la conexión y no contesta bloquea el worker de
+            # gunicorn (throttle, /healthz/celery). Mismo plazo que el broker.
+            'OPTIONS': {'socket_timeout': 2, 'socket_connect_timeout': 2},
         },
     }
 
