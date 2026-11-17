@@ -6,6 +6,8 @@
 3. Inspecciones con un operario de otro cliente: ese operario sigue viéndolas, y la API no deja
    editarlas hasta reasignarlas. Se reasignan en /admin/ de Django (guardar pasa por las
    señales); la app del cliente aún no tiene pantalla para reasignar.
+4. Inspecciones sin terminar de operarios dados de baja: nadie puede terminarlas hasta
+   reasignarlas a un operario activo, también en /admin/.
 
 Solo lee. Imprime la orden sugerida para la Shell cuando no hay duda (la misma regla que
 la migración users/0003: un único dueño, y que sea un administrador activo); si la hay, pide
@@ -51,19 +53,22 @@ def _admin_activo(u):
 
 
 class Command(BaseCommand):
-    help = 'Lista operarios sin administrador y propiedades sin dueño o de operarios (solo lectura).'
+    help = ('Lista operarios sin administrador, propiedades sin dueño o de operarios e inspecciones '
+            'cruzadas o sin terminar de operarios dados de baja (solo lectura).')
 
     def handle(self, *args, **options):
         n_operarios = self._operarios_sin_administrador()
         n_propiedades = self._propiedades_de_operarios()
         n_cruzadas = self._inspecciones_cruzadas()
-        if n_operarios == 0 and n_propiedades == 0 and n_cruzadas == 0:
+        n_de_baja = self._inspecciones_de_baja()
+        if n_operarios == 0 and n_propiedades == 0 and n_cruzadas == 0 and n_de_baja == 0:
             self.stdout.write('Sin huérfanos.')
             return
         self.stdout.write(
             f'\nResumen: {n_operarios} operario(s) sin administrador, '
             f'{n_propiedades} propiedad(es) sin dueño o de operarios, '
-            f'{n_cruzadas} inspección(es) con operario de otro cliente.\n'
+            f'{n_cruzadas} inspección(es) con operario de otro cliente, '
+            f'{n_de_baja} inspección(es) sin terminar de operarios dados de baja.\n'
             'Las órdenes, una a una y tras revisarlas, en `manage.py shell` con '
             '`from users.models import User; from propiedades.models import Propiedad`.'
         )
@@ -191,5 +196,30 @@ class Command(BaseCommand):
                 f'- #{inspeccion.pk} en {_texto(propiedad.nombre)} (#{propiedad.pk}) de '
                 f'{_usuario(propiedad.owner)}: operario {_usuario(operario)}, {de_quien}. '
                 f'Reasignarla en /admin/ de Django a un operario de {_usuario(propiedad.owner)}.'
+            )
+        return total
+
+    def _inspecciones_de_baja(self):
+        # El operario dado de baja ya no entra y la API no deja asignar a uno inactivo:
+        # si nadie la reasigna, la inspección se queda sin terminar para siempre
+        de_baja = (
+            Inspeccion.objects.filter(operario__is_active=False)
+            .exclude(estado=Inspeccion.Estado.COMPLETADA)
+            .select_related('propiedad__owner', 'operario')
+            .order_by('pk')
+        )
+        total = 0
+        for inspeccion in de_baja:
+            if total == 0:
+                self.stdout.write('Inspecciones sin terminar de operarios dados de baja:')
+            total += 1
+            propiedad = inspeccion.propiedad
+            # Una propiedad sin dueño ya sale en la sección 2: ahí se decide de quién es
+            de_quien = f'de {_usuario(propiedad.owner)}' if propiedad.owner else 'sin cliente'
+            self.stdout.write(
+                f'- #{inspeccion.pk} en {_texto(propiedad.nombre)} (#{propiedad.pk}) {de_quien}, '
+                f'{_texto(inspeccion.get_estado_display()).lower()}: operario '
+                f'{_usuario(inspeccion.operario)}. Reasignarla en /admin/ de Django a un operario '
+                f'activo del cliente.'
             )
         return total

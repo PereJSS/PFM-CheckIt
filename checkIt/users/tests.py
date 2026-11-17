@@ -485,6 +485,52 @@ class OperariosHuerfanosCommandTest(TestCase):
         call_command('operarios_huerfanos', stdout=salida)
         return salida.getvalue()
 
+    def test_lista_inspecciones_sin_terminar_de_operarios_de_baja(self):
+        # Nadie puede terminarlas: el operario ya no entra y la API no deja asignar a uno inactivo
+        from inspecciones.models import Inspeccion
+        baja = self._operario('op_baja', administrador=self.admin_a)
+        pendiente = self._inspeccion(self.prop_a, baja)
+        en_curso = self._inspeccion(self.prop_a, baja)
+        completada = self._inspeccion(self.prop_a, baja)
+        Inspeccion.objects.filter(pk=en_curso.pk).update(estado=Inspeccion.Estado.EN_PROGRESO)
+        Inspeccion.objects.filter(pk=completada.pk).update(estado=Inspeccion.Estado.COMPLETADA)
+        activo = self._operario('op_activo', administrador=self.admin_a)
+        de_activo = self._inspeccion(self.prop_a, activo)
+        User.objects.filter(pk=baja.pk).update(is_active=False)
+
+        salida = self._ejecutar()
+        self.assertIn('Inspecciones sin terminar de operarios dados de baja:', salida)
+        self.assertIn(f'#{pendiente.pk} en Piso A', salida)
+        self.assertIn(f'#{en_curso.pk} en Piso A', salida)
+        self.assertIn(f'op_baja (#{baja.pk}) [inactivo]', salida)
+        self.assertNotIn(f'#{completada.pk} en', salida)
+        self.assertNotIn(f'#{de_activo.pk} en', salida)
+        self.assertNotIn('op_activo', salida)
+        self.assertIn('2 inspección(es) sin terminar de operarios dados de baja', salida)
+        self.assertNotIn('Sin huérfanos', salida)
+        # Reasignar es decisión del cliente: no se sugiere ninguna orden
+        self.assertNotIn('.update(', salida)
+
+    def test_seccion_de_bajas_escapa_el_nombre_de_la_propiedad(self):
+        baja = self._operario('op_baja', administrador=self.admin_a)
+        trampa = self.Propiedad.objects.create(
+            owner=self.admin_a, nombre='Piso\nUser.objects.filter(pk=1).update(is_active=True)',
+            direccion='-',
+        )
+        self._inspeccion(trampa, baja)
+        User.objects.filter(pk=baja.pk).update(is_active=False)
+        salida = self._ejecutar()
+        self.assertIn('Piso\\nUser', salida)
+        self.assertFalse(any(l.startswith('User.objects') for l in salida.splitlines()))
+
+    def test_operario_de_baja_con_todo_completado_no_sale(self):
+        from inspecciones.models import Inspeccion
+        baja = self._operario('op_terminado', administrador=self.admin_a)
+        hecha = self._inspeccion(self.prop_a, baja)
+        Inspeccion.objects.filter(pk=hecha.pk).update(estado=Inspeccion.Estado.COMPLETADA)
+        User.objects.filter(pk=baja.pk).update(is_active=False)
+        self.assertIn('Sin huérfanos', self._ejecutar())
+
     def test_sin_datos_dice_sin_huerfanos(self):
         self._operario('ligado', administrador=self.admin_a)
         salida = self._ejecutar()
@@ -609,7 +655,11 @@ class OperariosHuerfanosCommandTest(TestCase):
             self.Propiedad.objects.create(owner=op, nombre=f'P{k}', direccion='-')
             op_b = self._operario(f'op_b_{k}', administrador=self.admin_b)
             self._inspeccion(self.prop_a, op_b)
-        with self.assertNumQueries(5):
+            de_baja = self._operario(f'op_baja_{k}', administrador=self.admin_a)
+            self._inspeccion(self.prop_a, de_baja)
+            User.objects.filter(pk=de_baja.pk).update(is_active=False)
+        # Dos por cada sección con prefetch (operarios y propiedades) y una por las otras dos
+        with self.assertNumQueries(6):
             call_command('operarios_huerfanos', stdout=StringIO())
 
     def test_nombre_con_salto_de_linea_no_inyecta_ordenes(self):
