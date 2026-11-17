@@ -185,6 +185,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `PAQUETE_THROTTLE_RATE` | No        | Límite de descargas del paquete probatorio por usuario (por defecto `10/hour`) |
 | `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
 | `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
+| `AUTH_REFRESH_THROTTLE_RATE` | No   | Límite de refresco del token por IP (por defecto `30/min`) |
 | `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
 | `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`). **En Render es `2`** (Cloudflare + balanceador de Render; verificado el 15 oct de 2026). Con un valor bajo, la identidad del throttling es la IP del proxy y los clientes comparten contador; con uno alto, se elude falsificando `X-Forwarded-For` |
 | `WEBHOOK_SALIENTE_TIMEOUT_CONEXION` | No | Timeout de conexión de los webhooks salientes en segundos (por defecto `3`) |

@@ -221,6 +221,8 @@ REST_FRAMEWORK = {
         'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
         'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
         'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),
+        # Por IP. El frontend refresca como mucho una vez cada 8 h por pestaña
+        'auth_refresh': config('AUTH_REFRESH_THROTTLE_RATE', default='30/min'),
     },
 }
 

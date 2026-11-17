@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from typing import cast
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers
@@ -16,6 +16,15 @@ class ThrottledTokenObtainPairView(TokenObtainPairView):
     """Login JWT con límite de peticiones (scope 'auth') contra fuerza bruta."""
     throttle_classes = [ScopedRateThrottle, LoginUsuarioThrottle]
     throttle_scope = 'auth_login'
+
+
+class ThrottledTokenRefreshView(TokenRefreshView):
+    """Devuelve un access token nuevo a partir del refresh token. Con demasiadas
+    peticiones desde la misma IP responde 429 con la cabecera Retry-After."""
+    # Sin límite se pueden probar refresh tokens filtrados sin freno. Cuota propia
+    # para no bloquear a quien acaba de fallar el login.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_refresh'
 
 
 class RegisterAdminView(APIView):

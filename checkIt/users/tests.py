@@ -424,6 +424,38 @@ class AuthThrottleTest(APITestCase):
             resp = self._login('otro')
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def _refresh(self, token='no-es-un-token', **extra):
+        return self.client.post('/api/v1/auth/refresh/', {'refresh': token}, **extra)
+
+    def test_refresh_returns_429_over_rate(self):
+        # Sin límite, el refresco permite probar tokens robados o filtrados sin freno
+        with limitar(auth_refresh='2/min'):
+            resps = [self._refresh() for _ in range(3)]
+        self.assertEqual([r.status_code for r in resps[:2]], [status.HTTP_401_UNAUTHORIZED] * 2)
+        self.assertEqual(resps[2].status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn('Retry-After', resps[2])
+
+    def test_refresh_bucket_is_separate_from_login(self):
+        # Un usuario que ha fallado el login sigue pudiendo refrescar su sesión
+        with limitar(auth_login='1/min', auth_refresh='5/min'):
+            self._login()
+            self._login()
+            resp = self._refresh()
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_refresh_rate_is_configured(self):
+        # Sin la cuota la vista da un 500, y los tests de arriba no lo ven porque la parchean
+        self.assertIn('auth_refresh', settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'])
+        self.assertEqual(self._refresh().status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_valid_refresh_still_works_under_rate(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(User.objects.get(username='u1')))
+        with limitar(auth_refresh='2/min'):
+            resp = self._refresh(token)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('access', resp.data)
+
 
 class OperariosHuerfanosCommandTest(TestCase):
     """`manage.py operarios_huerfanos`: solo lee; lista operarios sin administrador y
