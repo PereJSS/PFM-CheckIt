@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from rest_framework import viewsets
@@ -20,7 +21,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
-from .models import Evidencia
+from .models import ESTANCIA_MAX, Evidencia
 from django.http import HttpResponse
 from django.db import transaction
 from django.conf import settings
@@ -88,6 +89,23 @@ def _validate_evidence_file(foto):
 MARGEN_RELOJ_DISPOSITIVO = timedelta(minutes=5)
 # Un reloj sin configurar (1970, 2000…) no es una hora de captura
 CAPTURA_MAS_ANTIGUA = datetime(2000, 1, 1, tzinfo=dt_timezone.utc)
+
+
+def _estancia(valor):
+    """Estancia que declara el operario (opcional). Devuelve (texto o None, error)."""
+    if valor is None:
+        return None, None
+    if not isinstance(valor, str):
+        return None, "estancia debe ser texto."
+    # NFC: «ñ» compuesta cuenta como un carácter, como la ve el operario
+    texto = unicodedata.normalize('NFC', valor).strip()
+    # Control, formato (bidi, ancho cero) y separadores de línea: harían que el acta
+    # mostrase algo distinto de lo guardado
+    if any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in texto):
+        return None, "estancia no puede contener caracteres de control ni de dirección del texto."
+    if len(texto) > ESTANCIA_MAX:
+        return None, f"estancia no puede tener más de {ESTANCIA_MAX} caracteres."
+    return texto or None, None
 
 
 def _capturada_en(valor):
@@ -478,6 +496,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         capturada_en, error = _capturada_en(request.data.get('capturada_en'))
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        estancia, error = _estancia(request.data.get('estancia'))
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         # La TSA se consulta antes del bloqueo para no retener la fila durante la llamada de red
         tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
 
@@ -494,6 +515,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 inspeccion=inspeccion,
                 foto=foto,
                 descripcion=request.data.get('descripcion') or '',
+                estancia=estancia,
                 hash_sha256=hash_sha256,
                 capturada_en=capturada_en,
                 tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
@@ -505,6 +527,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 "id": evidencia.pk,
                 "inspeccion": inspeccion.pk,
                 "descripcion": evidencia.descripcion,
+                "estancia": evidencia.estancia,
                 "hash_sha256": evidencia.hash_sha256,
                 "tsa_applied": bool(evidencia.tsa_token),
                 "tsa_timestamp": evidencia.tsa_timestamp,

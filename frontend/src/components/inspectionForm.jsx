@@ -6,6 +6,7 @@ import {
   saveEvidenceOffline,
 } from "../services/offline";
 import api from "../services/api";
+import { formularioEvidencia } from "../services/formularioEvidencia";
 
 const ROOMS = [
   "Salón",
@@ -340,11 +341,13 @@ export default function InspectionForm({ inspectionId }) {
       // al crear el archivo; el servidor la guarda como dato declarado, no certificado.
       const capturedAt = desdeCamara ? horaDeArchivo(file) : null;
 
-      const formData = new FormData();
-      formData.append("foto", file);
-      formData.append("descripcion", description || `${room}`);
-      formData.append("hash_sha256", hash);
-      if (capturedAt) formData.append("capturada_en", capturedAt);
+      const formData = formularioEvidencia({
+        file,
+        room,
+        description,
+        hash,
+        capturedAt,
+      });
 
       try {
         await api.post(`/inspecciones/${inspectionId}/evidencias/`, formData);

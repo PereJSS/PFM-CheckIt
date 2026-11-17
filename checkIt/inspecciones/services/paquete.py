@@ -156,6 +156,8 @@ def _añadir_evidencias(paquete, inspeccion):
             'evidencia': evidencia.pk,
             'archivo': archivo,
             'descripcion': evidencia.descripcion or '',
+            # Declarada por el operario: fuera del manifiesto y sin sello
+            'estancia': evidencia.estancia,
             # Declarada por el dispositivo: fuera del manifiesto y sin sello
             'capturada_en': _iso(evidencia.capturada_en),
             'capturada_en_certificada': False,

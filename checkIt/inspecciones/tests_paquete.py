@@ -155,6 +155,11 @@ class PaqueteContenidoTest(_ConExpediente, TestCase):
         for nombre, suma in sumas.items():
             self.assertEqual(hashlib.sha256(z.read(nombre)).hexdigest(), suma)
 
+    def test_expediente_lleva_la_estancia_como_dato_declarado(self):
+        Evidencia.objects.filter(pk=self.fotos[0].pk).update(estancia='Cocina')
+        fichas = json.loads(self._zip().read('expediente.json'))['evidencias']
+        self.assertEqual([f['estancia'] for f in fichas], ['Cocina', None])
+
     def test_expediente_resume_inspeccion_y_sello(self):
         datos = json.loads(self._zip().read('expediente.json'))
         self.assertEqual(datos['inspeccion']['id'], self.inspeccion.pk)

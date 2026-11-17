@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import InspectionForm from "../components/inspectionForm";
 import api from "../services/api";
 import { syncPendingEvidences } from "../services/offline";
+import { formularioEvidencia } from "../services/formularioEvidencia";
 import { horaDeArchivo } from "../utils/hora";
 import { clearAuthTokens } from "../services/authStorage";
 
@@ -42,32 +43,19 @@ export default function InspectionPage() {
       if (!navigator.onLine) return;
 
       const result = await syncPendingEvidences(async (evidence) => {
-        // Reconstruye payload multipart igual que una subida normal online.
-        const formData = new FormData();
-        const fallbackName = `evidencia_${Date.now()}.jpg`;
-
-        formData.append(
-          "foto",
-          evidence.file,
-          evidence.file?.name || fallbackName,
-        );
-        formData.append(
-          "descripcion",
-          evidence.description || evidence.room || "Evidencia sin descripción",
-        );
-
-        if (evidence.hash) {
-          formData.append("hash_sha256", evidence.hash);
-        }
-        // capturedAt null = archivo elegido, sin hora fiable. Las guardadas antes
-        // del #29 no tienen la clave: el archivo conserva su lastModified.
-        const capturedAt =
-          "capturedAt" in evidence
-            ? evidence.capturedAt
-            : horaDeArchivo(evidence.file);
-        if (capturedAt) {
-          formData.append("capturada_en", capturedAt);
-        }
+        // Mismo multipart que una subida normal online. capturedAt null = archivo
+        // elegido, sin hora fiable; las guardadas antes del #29 no tienen la clave y
+        // el archivo conserva su lastModified.
+        const formData = formularioEvidencia({
+          file: evidence.file,
+          room: evidence.room,
+          description: evidence.description,
+          hash: evidence.hash,
+          capturedAt:
+            "capturedAt" in evidence
+              ? evidence.capturedAt
+              : horaDeArchivo(evidence.file),
+        });
 
         await api.post(
           `/inspecciones/${evidence.inspectionId}/evidencias/`,

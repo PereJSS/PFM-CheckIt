@@ -119,11 +119,19 @@ def ruta_evidencia(instance, filename):
     return f'evidencias/{int(instance.inspeccion_id)}/{uuid.uuid4().hex}{extension}'
 
 
+# Largo máximo de la estancia que declara el operario (p. ej. «Dormitorio 2»)
+ESTANCIA_MAX = 60
+
+
 # Modelo para almacenar evidencias (fotos) de las inspecciones
 class Evidencia(models.Model):
     inspeccion = models.ForeignKey(Inspeccion, on_delete=models.CASCADE, related_name="evidencias")
     foto = models.ImageField(upload_to=ruta_evidencia)
     descripcion = models.TextField(blank=True, null=True)
+    # La declara el operario y queda fuera del manifiesto sellado, como la descripción.
+    # Nullable: las fotos anteriores no la tienen, y las instancias viejas del deploy
+    # insertan sin conocer la columna
+    estancia = models.CharField(max_length=ESTANCIA_MAX, blank=True, null=True)
     # Pese al nombre, es la hora en que el servidor recibió la foto
     fecha_captura = models.DateTimeField(auto_now_add=True)
     # Hora de la foto según el dispositivo: la declara el cliente, nadie la certifica

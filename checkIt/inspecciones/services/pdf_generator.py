@@ -92,6 +92,17 @@ def _host(url):
     return urlparse(url).hostname or url or '—'
 
 
+def _texto_evidencia(ev):
+    """Estancia y descripción de una foto. Las escribe el operario: se escapan, porque
+    Paragraph interpreta marcado, y se dice que la estancia no está sellada."""
+    descripcion = escape(ev.descripcion or 'Sin descripción')
+    if not ev.estancia:
+        return descripcion
+    return (
+        f'<b>Estancia:</b> {escape(ev.estancia)} (declarada por el operario) · {descripcion}'
+    )
+
+
 def _horas_evidencia(ev):
     """Las tres horas de una evidencia y quién da cada una (#29): el sello prueba que la
     foto existía a esa hora; la de captura solo la declara el dispositivo."""
@@ -201,8 +212,7 @@ def generar_informe_base(inspeccion, output_path=None):
         for idx, ev in enumerate(evidencias, start=1):
             story.append(Paragraph(f'<b>Evidencia #{idx}</b>', s['value']))
             story.append(Paragraph(_horas_evidencia(ev), s['small']))
-            # Texto del operario: escapado, Paragraph interpreta marcado
-            story.append(Paragraph(escape(ev.descripcion or 'Sin descripción'), s['small']))
+            story.append(Paragraph(_texto_evidencia(ev), s['small']))
 
             imagen = _leer_foto(ev)
             if imagen is None:
