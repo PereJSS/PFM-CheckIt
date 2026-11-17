@@ -58,6 +58,19 @@ class OpenApiDocsTest(_APITestCase):
         propiedades = self.client.get('/api/v1/schema/?format=json').json()['components']['schemas']
         self.assertEqual(set(propiedades['EstadoPdf']['properties']), {'estado', 'pdf_listo'})
 
+    def test_propiedades_documenta_el_403_de_los_operarios(self):
+        # Un operario recibe 403 en todas las operaciones: el integrador debe saberlo
+        paths = self.client.get('/api/v1/schema/?format=json').json()['paths']
+        rutas = {k: v for k, v in paths.items() if k.startswith('/api/v1/propiedades/')}
+        self.assertEqual(len(rutas), 2)
+        for ruta, metodos in rutas.items():
+            for metodo, operacion in metodos.items():
+                with self.subTest(ruta=ruta, metodo=metodo):
+                    self.assertIn('403', operacion['responses'])
+                    # Las respuestas de éxito siguen documentadas con su esquema
+                    exito = {'get': '200', 'post': '201', 'put': '200', 'patch': '200', 'delete': '204'}[metodo]
+                    self.assertIn(exito, operacion['responses'])
+
 
 # Los tests de salud no deben tocar un Redis real aunque haya REDIS_URL en el entorno
 CACHE_LOCAL = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
