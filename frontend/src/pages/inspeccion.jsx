@@ -1,7 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import InspectionForm from "../components/inspectionForm";
 import api from "../services/api";
-import { syncPendingEvidences } from "../services/offline";
+import {
+  getRejectedEvidences,
+  reintentarEvidencia,
+  removeOfflineEvidence,
+  syncPendingEvidences,
+} from "../services/offline";
 import { formularioEvidencia } from "../services/formularioEvidencia";
 import { horaDeArchivo } from "../utils/hora";
 import { clearAuthTokens } from "../services/authStorage";
@@ -18,6 +23,24 @@ const ESTADO_LABEL = {
   COMPLETADA: "Completada",
 };
 
+// Sube una foto guardada en el móvil con el mismo multipart que una subida normal.
+// capturedAt null = archivo elegido, sin hora fiable; las guardadas antes del #29 no
+// tienen la clave y el archivo conserva su lastModified.
+const subirGuardada = (evidence) =>
+  api.post(
+    `/inspecciones/${evidence.inspectionId}/evidencias/`,
+    formularioEvidencia({
+      file: evidence.file,
+      room: evidence.room,
+      description: evidence.description,
+      hash: evidence.hash,
+      capturedAt:
+        "capturedAt" in evidence
+          ? evidence.capturedAt
+          : horaDeArchivo(evidence.file),
+    }),
+  );
+
 export default function InspectionPage() {
   // Estado principal de la pantalla del operario.
   const [inspecciones, setInspecciones] = useState([]);
@@ -25,6 +48,31 @@ export default function InspectionPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [syncInfo, setSyncInfo] = useState(null);
+  // Fotos guardadas en el móvil que el servidor rechazó (no se reintentan solas)
+  const [rechazadas, setRechazadas] = useState([]);
+  // Fallos al leer o escribir las fotos guardadas en el móvil (IndexedDB)
+  const [avisoLocal, setAvisoLocal] = useState(null);
+  const montada = useRef(false);
+  // Solo vale la última lectura: una anterior podría traer una foto ya descartada
+  const ultimaLectura = useRef(0);
+  const tituloRechazadas = useRef(null);
+
+  const cargarRechazadas = () => {
+    const lectura = ++ultimaLectura.current;
+    return getRejectedEvidences()
+      .then((lista) => {
+        if (montada.current && lectura === ultimaLectura.current) {
+          setRechazadas(lista);
+        }
+      })
+      .catch((e) => {
+        // Se deja la lista que había: vaciarla escondería fotos que siguen en el móvil
+        console.error("No se pudieron leer las fotos guardadas", e);
+        if (montada.current) {
+          setAvisoLocal("No se pudieron comprobar las fotos guardadas en este móvil.");
+        }
+      });
+  };
 
   // Carga el listado de inspecciones asignadas al operario autenticado.
   const cargar = () =>
@@ -34,52 +82,78 @@ export default function InspectionPage() {
       .catch(() => setError("No se pudieron cargar las inspecciones."))
       .finally(() => setLoading(false));
 
+  // Si hay conexión, sube las fotos guardadas en el móvil
+  const sincronizar = () => {
+    if (!navigator.onLine) return Promise.resolve();
+    return syncPendingEvidences(subirGuardada)
+      .then((result) => {
+        if (!montada.current) return;
+        if (result.rejected.length > 0) cargarRechazadas();
+        if (result.syncedCount > 0) {
+          // Tras sincronizar, refresca para reflejar estado/contador actualizado.
+          setSyncInfo(
+            `Se sincronizaron ${result.syncedCount} evidencias pendientes.`,
+          );
+          cargar();
+        }
+      })
+      .catch((e) => {
+        console.error("Falló la sincronización de las fotos guardadas", e);
+        if (montada.current) {
+          setAvisoLocal(
+            "No se pudieron sincronizar las fotos guardadas en este móvil; se volverá a intentar.",
+          );
+        }
+      });
+  };
+
+  const descartar = async (r) => {
+    const confirmado = window.confirm(
+      `¿Descartar la foto de ${r.room || "sin estancia"}? Se borrará de este móvil y no se podrá recuperar.`,
+    );
+    if (!confirmado) return;
+    try {
+      await removeOfflineEvidence(r.id);
+    } catch (e) {
+      console.error("No se pudo descartar la foto", e);
+      setAvisoLocal("No se pudo descartar la foto. Inténtalo de nuevo.");
+      return;
+    }
+    await cargarRechazadas();
+    // El botón pulsado desaparece: el foco vuelve al aviso si sigue en pantalla
+    tituloRechazadas.current?.focus();
+  };
+
+  // Para rechazos que ya no aplican (p. ej. un permiso que se arregló)
+  const reintentar = async (r) => {
+    try {
+      await reintentarEvidencia(r.id);
+    } catch (e) {
+      console.error("No se pudo volver a poner en cola la foto", e);
+      setAvisoLocal("No se pudo reintentar la foto. Inténtalo de nuevo.");
+      return;
+    }
+    await cargarRechazadas();
+    tituloRechazadas.current?.focus();
+    sincronizar();
+  };
+
   useEffect(() => {
+    montada.current = true;
     // Hidratación inicial de datos al entrar en la página.
     cargar();
-
-    // Si hay conexión, intenta subir automáticamente evidencias guardadas offline.
-    const syncOfflineNow = async () => {
-      if (!navigator.onLine) return;
-
-      const result = await syncPendingEvidences(async (evidence) => {
-        // Mismo multipart que una subida normal online. capturedAt null = archivo
-        // elegido, sin hora fiable; las guardadas antes del #29 no tienen la clave y
-        // el archivo conserva su lastModified.
-        const formData = formularioEvidencia({
-          file: evidence.file,
-          room: evidence.room,
-          description: evidence.description,
-          hash: evidence.hash,
-          capturedAt:
-            "capturedAt" in evidence
-              ? evidence.capturedAt
-              : horaDeArchivo(evidence.file),
-        });
-
-        await api.post(
-          `/inspecciones/${evidence.inspectionId}/evidencias/`,
-          formData,
-        );
-      });
-
-      if (result.syncedCount > 0) {
-        // Tras sincronizar, refresca para reflejar estado/contador actualizado.
-        setSyncInfo(
-          `Se sincronizaron ${result.syncedCount} evidencias pendientes.`,
-        );
-        cargar();
-      }
-    };
-
+    cargarRechazadas();
     // Reintenta sincronización al recuperar conectividad del dispositivo.
-    syncOfflineNow();
-    window.addEventListener("online", syncOfflineNow);
+    sincronizar();
+    window.addEventListener("online", sincronizar);
 
     // Limpieza del listener al desmontar la página.
     return () => {
-      window.removeEventListener("online", syncOfflineNow);
+      montada.current = false;
+      window.removeEventListener("online", sincronizar);
     };
+    // Solo al montar: las funciones leen estado mediante refs y setters estables
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Solo se muestran inspecciones en curso o pendientes de completar.
@@ -114,6 +188,68 @@ export default function InspectionPage() {
         {/* Mensajes de sincronización y estado de carga/errores. */}
         {syncInfo && (
           <p className="mb-3 text-sm text-emerald-700">{syncInfo}</p>
+        )}
+        {avisoLocal && (
+          <p role="alert" className="mb-3 text-sm text-red-600">
+            {avisoLocal}
+          </p>
+        )}
+        {rechazadas.length > 0 && (
+          <section
+            aria-labelledby="titulo-rechazadas"
+            className="mb-4 px-4 py-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700"
+          >
+            {/* Solo el título es región viva: la lista y los botones no se releen */}
+            <div role="alert">
+              <h2
+                id="titulo-rechazadas"
+                ref={tituloRechazadas}
+                tabIndex={-1}
+                className="font-semibold focus:outline-none"
+              >
+                El servidor no aceptó{" "}
+                {rechazadas.length === 1
+                  ? "una foto guardada"
+                  : `${rechazadas.length} fotos guardadas`}{" "}
+                en este móvil
+              </h2>
+            </div>
+            <p className="mt-1">
+              No aparecerán en el acta. Puedes reintentarlas o descartarlas y
+              volver a tomarlas.
+            </p>
+            <ul className="mt-2 flex flex-col gap-2">
+              {rechazadas.map((r, i) => {
+                const cual = `la foto ${i + 1} de ${rechazadas.length} (${r.room || "sin estancia"})`;
+                return (
+                  <li key={r.id} className="flex items-start justify-between gap-3">
+                    <span>
+                      <span className="font-medium">{r.room || "Sin estancia"}</span>
+                      : {r.motivo}
+                    </span>
+                    <span className="flex shrink-0 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => reintentar(r)}
+                        aria-label={`Reintentar ${cual}`}
+                        className="text-red-700 underline hover:text-red-900"
+                      >
+                        Reintentar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => descartar(r)}
+                        aria-label={`Descartar ${cual}`}
+                        className="text-red-700 underline hover:text-red-900"
+                      >
+                        Descartar
+                      </button>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         )}
         {loading && (
           <p className="text-sm text-slate-500">Cargando inspecciones…</p>

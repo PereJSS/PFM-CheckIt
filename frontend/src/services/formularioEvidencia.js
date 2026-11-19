@@ -2,6 +2,9 @@
 // normal y la sincronización de la cola sin conexión, para que manden lo mismo.
 // La estancia va en su propio campo: antes iba en la descripción, y solo si el
 // operario no escribía nada, así que con descripción el acta no la decía.
+// Mismo tope que DESCRIPCION_MAX en el backend (inspecciones/models.py)
+export const DESCRIPCION_MAX = 1000;
+
 export const formularioEvidencia = ({
   file,
   room,

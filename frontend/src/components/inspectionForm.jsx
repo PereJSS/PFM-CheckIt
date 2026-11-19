@@ -6,7 +6,11 @@ import {
   saveEvidenceOffline,
 } from "../services/offline";
 import api from "../services/api";
-import { formularioEvidencia } from "../services/formularioEvidencia";
+import {
+  DESCRIPCION_MAX,
+  formularioEvidencia,
+} from "../services/formularioEvidencia";
+import { esRechazoDefinitivo, motivoDelRechazo } from "../services/erroresSubida";
 
 const ROOMS = [
   "Salón",
@@ -355,7 +359,16 @@ export default function InspectionForm({ inspectionId }) {
           type: "success",
           text: "Evidencia subida y sellada correctamente.",
         });
-      } catch {
+      } catch (error) {
+        // Un rechazo del servidor (datos no válidos, inspección completada…) no se
+        // arregla reintentando: se avisa y se deja el texto para corregirlo
+        if (esRechazoDefinitivo(error)) {
+          setStatus({
+            type: "error",
+            text: `No se ha subido la foto: ${motivoDelRechazo(error)}`,
+          });
+          return;
+        }
         // Si falla la subida, conservar evidencia local evita pérdida de datos.
         await saveEvidenceOffline({
           inspectionId,
@@ -376,7 +389,9 @@ export default function InspectionForm({ inspectionId }) {
       setStep(1);
       setRoom("");
       setDescription("");
-    } catch {
+    } catch (e) {
+      // Hash o guardado en el móvil fallidos: no se limpia el formulario
+      console.error("No se pudo procesar la evidencia", e);
       setStatus({
         type: "error",
         text: "Error al procesar la evidencia. Inténtalo de nuevo.",
@@ -512,10 +527,18 @@ export default function InspectionForm({ inspectionId }) {
                 </label>
                 <textarea
                   value={description}
+                  maxLength={DESCRIPCION_MAX}
+                  aria-describedby="contador-descripcion"
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Ej: Arañazo profundo en la puerta del armario…"
                   className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white resize-none h-24 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
                 />
+                <p
+                  id="contador-descripcion"
+                  className="mt-1 text-xs text-slate-400 text-right"
+                >
+                  {description.length}/{DESCRIPCION_MAX} caracteres
+                </p>
               </div>
 
               {/* Botón cámara principal */}
@@ -568,6 +591,7 @@ export default function InspectionForm({ inspectionId }) {
           {/* Mensajes de estado del flujo: éxito, error o información. */}
           {status && (
             <div
+              role={status.type === "error" ? "alert" : "status"}
               className={`mt-5 px-4 py-3 rounded-lg text-sm font-medium ${
                 status.type === "success"
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
