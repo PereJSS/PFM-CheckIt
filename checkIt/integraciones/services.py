@@ -1,12 +1,18 @@
+import logging
+
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
 from inspecciones.models import Inspeccion
+from inspecciones.services.checklist import instanciar_checklist, plantilla_efectiva
 from propiedades.models import Propiedad
 
 from .models import WebhookEvent
 
 EVENTO_CHECKOUT = 'reservation.checkout'
+
+logger = logging.getLogger(__name__)
 
 
 def _procesar_checkout(evento):
@@ -18,6 +24,23 @@ def _procesar_checkout(evento):
         evento.error = f"No existe ninguna propiedad con external_id '{external_id}'."
         return
     evento.inspeccion = Inspeccion.objects.create(propiedad=propiedad, operario=None)
+    # La plantilla de la propiedad (o la por defecto del cliente); sin ninguna, como hasta ahora.
+    # Una plantilla guardada sin validar no hace perder el check-out: la inspección se crea
+    # sin checklist, se avisa en el evento y el admin la aplica tras corregirla
+    try:
+        with transaction.atomic():
+            instanciar_checklist(evento.inspeccion)
+    except ValidationError as e:
+        plantilla = plantilla_efectiva(propiedad)
+        nombre = plantilla.nombre if plantilla else '?'
+        logger.error(
+            "Checkout %s: inspección %s creada sin checklist, la plantilla %s no es válida: %s",
+            evento.pk, evento.inspeccion.pk, getattr(plantilla, 'pk', None), e.messages,
+        )
+        evento.error = (
+            f"Inspección creada sin checklist: la plantilla «{nombre}» no es válida "
+            f"({'; '.join(e.messages)}). Corrígela y aplícala desde la inspección."
+        )[:1000]
     evento.estado = WebhookEvent.Estado.PROCESADO
 
 

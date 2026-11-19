@@ -53,7 +53,10 @@ def instanciar_checklist(inspeccion, plantilla=None):
                 plantilla_version=plantilla.version,
             )
     except IntegrityError:
-        return ChecklistInspeccion.objects.get(inspeccion=inspeccion)
+        existente = _checklist_de(inspeccion)
+        if existente is None:
+            raise  # no era el OneToOne: que se vea el error real
+        return existente
     estancias = EstanciaInspeccion.objects.bulk_create([
         EstanciaInspeccion(checklist=checklist, orden=i, nombre=e['nombre'])
         for i, e in enumerate(estructura['estancias'])

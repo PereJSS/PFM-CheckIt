@@ -107,7 +107,7 @@ class InstanciarChecklistTest(BaseChecklist):
     def test_si_otra_llamada_la_crea_a_la_vez_devuelve_esa(self):
         primera = instanciar_checklist(self.insp, self.plantilla)
         # La comprobación previa no la ve (llegaron a la vez): el OneToOne decide
-        with patch('inspecciones.services.checklist._checklist_de', return_value=None):
+        with patch('inspecciones.services.checklist._checklist_de', side_effect=[None, primera]):
             with transaction.atomic():
                 segunda = instanciar_checklist(self.insp, self.plantilla)
                 # La transacción de quien llama sigue usable

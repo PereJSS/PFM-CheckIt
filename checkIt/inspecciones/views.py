@@ -10,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.http import FileResponse
 from django.core import signing
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.signing import BadSignature, SignatureExpired
 from .models import Inspeccion
 from .serializers import InspeccionSerializer
@@ -21,11 +22,13 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
-from .models import ESTANCIA_MAX, Evidencia, motivo_descripcion_no_valida
+from .models import ESTANCIA_MAX, ChecklistInspeccion, Evidencia, PuntoInspeccion, motivo_descripcion_no_valida
+from .services.checklist import faltas_para_completar, instanciar_checklist, plantilla_efectiva, resumen
+from propiedades.models import PlantillaChecklist
 from django.http import HttpResponse
 from django.db import transaction
 from django.conf import settings
-from django.db.models import Q, QuerySet
+from django.db.models import Count, Exists, OuterRef, Prefetch, Q, QuerySet
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from typing import cast
@@ -182,6 +185,90 @@ def _can_access_evidence(usuario, evidencia):
         )
     )
 
+class _ChecklistIncompleto(Exception):
+    def __init__(self, faltas):
+        self.faltas = faltas
+
+
+def _respuesta_faltas(faltas):
+    return Response(
+        {"error": "Faltan puntos del checklist por completar.", "faltas": faltas},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _nombre_usuario(usuario):
+    if usuario is None:
+        return None
+    return usuario.get_full_name() or usuario.username
+
+
+def _datos_punto(punto, evidencias=None):
+    if evidencias is None:
+        evidencias = [ev.pk for ev in punto.evidencias.all()]
+    return {
+        "id": punto.pk,
+        "texto": punto.texto,
+        "requiere_foto": punto.requiere_foto,
+        "resultado": punto.resultado,
+        "nota": punto.nota,
+        "marcado_en": punto.marcado_en,
+        "marcado_por_nombre": _nombre_usuario(punto.marcado_por),
+        "evidencias": evidencias,
+    }
+
+
+def _datos_checklist(inspeccion):
+    checklist = (
+        ChecklistInspeccion.objects.filter(inspeccion=inspeccion)
+        .prefetch_related(Prefetch(
+            'estancias__puntos',
+            queryset=PuntoInspeccion.objects.select_related('marcado_por').prefetch_related(
+                Prefetch('evidencias', queryset=Evidencia.objects.order_by('pk').only('pk', 'punto_id')),
+            ),
+        ))
+        .first()
+    )
+    if checklist is None:
+        return {"tiene_checklist": False}
+    return {
+        "tiene_checklist": True,
+        "plantilla_nombre": checklist.plantilla_nombre,
+        "plantilla_version": checklist.plantilla_version,
+        "estancias": [
+            {"id": e.pk, "nombre": e.nombre, "puntos": [_datos_punto(p) for p in e.puntos.all()]}
+            for e in checklist.estancias.all()
+        ],
+        "resumen": resumen(inspeccion.pk),
+    }
+
+
+_ID_DIGITOS = re.compile(r'^[0-9]{1,19}$')
+_ID_MAX = 2 ** 63 - 1
+
+
+def _id_entero(valor):
+    """Un id entero positivo que cabe en un bigint, o None (True, 1.5, '1e3', 10**30…)."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, str) and _ID_DIGITOS.match(valor.strip()):
+        valor = int(valor.strip())
+    if not isinstance(valor, int) or not 0 < valor <= _ID_MAX:
+        return None
+    return valor
+
+
+def _plantilla_propia(valor, usuario):
+    """(plantilla, error) para el campo opcional `plantilla` de una petición del admin."""
+    pk = _id_entero(valor)
+    if pk is None:
+        return None, "plantilla debe ser el id de una de tus plantillas."
+    plantilla = PlantillaChecklist.objects.filter(pk=pk, owner=usuario).first()
+    if plantilla is None:
+        return None, "La plantilla no existe."
+    return plantilla, None
+
+
 class InspeccionViewSet(viewsets.ModelViewSet):
     queryset: QuerySet[Inspeccion] = cast(QuerySet[Inspeccion], Inspeccion.objects.all())
     serializer_class = InspeccionSerializer
@@ -192,8 +279,27 @@ class InspeccionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):  # type: ignore[override]
         usuario = self.request.user
         if _is_admin_user(usuario):
-            return Inspeccion.objects.filter(propiedad__owner=usuario)
-        return Inspeccion.objects.filter(operario=usuario)
+            qs = Inspeccion.objects.filter(propiedad__owner=usuario)
+        else:
+            qs = Inspeccion.objects.filter(operario=usuario)
+        # Los permisos miran propiedad.owner: sin consultas extra por petición
+        qs = qs.select_related('propiedad__owner')
+        if getattr(self, 'action', None) == 'list':
+            # El resumen del checklist y lo anidado, sin una consulta por fila. Solo en el
+            # listado: un GROUP BY no admite el FOR UPDATE de otras acciones
+            R = PuntoInspeccion.Resultado
+            qs = (
+                qs.select_related('propiedad', 'operario')
+                .prefetch_related('evidencias')
+                .annotate(
+                    ck_tiene=Exists(ChecklistInspeccion.objects.filter(inspeccion=OuterRef('pk'))),
+                    ck_puntos=Count('puntos_checklist'),
+                    ck_ok=Count('puntos_checklist', filter=Q(puntos_checklist__resultado=R.OK)),
+                    ck_danos=Count('puntos_checklist', filter=Q(puntos_checklist__resultado=R.DANO)),
+                    ck_no_aplica=Count('puntos_checklist', filter=Q(puntos_checklist__resultado=R.NO_APLICA)),
+                )
+            )
+        return qs
 
     def create(self, request, *args, **kwargs):
         usuario = request.user
@@ -222,7 +328,24 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        self.perform_create(serializer)
+        # Otra plantilla propia solo para esta inspección (opcional)
+        plantilla = None
+        if request.data.get('plantilla') not in (None, ''):
+            plantilla, error = _plantilla_propia(request.data.get('plantilla'), usuario)
+            if error:
+                return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                self.perform_create(serializer)
+                instanciar_checklist(serializer.instance, plantilla)
+        except DjangoValidationError as e:
+            # Plantilla guardada sin validar (shell, datos viejos): no se crea nada
+            usada = plantilla or plantilla_efectiva(propiedad)
+            return Response(
+                {"error": f"La plantilla «{getattr(usada, 'nombre', '?')}» no es válida: {'; '.join(e.messages)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -261,7 +384,10 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             elif _operario_ajeno(inspeccion.operario, usuario):
                 return Response({"error": ERROR_OPERARIO_AJENO}, status=status.HTTP_400_BAD_REQUEST)
 
-            self.perform_update(serializer)
+            try:
+                self.perform_update(serializer)
+            except _ChecklistIncompleto as e:
+                return _respuesta_faltas(e.faltas)
             return Response(serializer.data)
 
         # Operario: solo puede marcar su inspección asignada como COMPLETADA.
@@ -283,13 +409,27 @@ class InspeccionViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(inspeccion, data={'estado': Inspeccion.Estado.COMPLETADA}, partial=True)
         serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
+        try:
+            self.perform_update(serializer)
+        except _ChecklistIncompleto as e:
+            return _respuesta_faltas(e.faltas)
         return Response(serializer.data)
 
     def perform_update(self, serializer):
         # El UPDATE y lo que hacen sus señales (congelar el manifiesto, el outbox de
         # webhooks) se confirman juntos: si el proceso muere entre ambos, no se pierde nada
         with transaction.atomic():
+            if serializer.validated_data.get('estado') == Inspeccion.Estado.COMPLETADA:
+                # Mismo bloqueo que la subida de fotos y el marcado de puntos: nadie cambia
+                # el checklist entre la comprobación y el congelado. El estado se relee
+                # bloqueado: la instancia se leyó antes
+                actual = Inspeccion.objects.select_for_update().values_list('estado', flat=True).get(
+                    pk=serializer.instance.pk,
+                )
+                if actual != Inspeccion.Estado.COMPLETADA:
+                    faltas = faltas_para_completar(serializer.instance.pk)
+                    if faltas:
+                        raise _ChecklistIncompleto(faltas)
             super().perform_update(serializer)
 
     def update(self, request, *args, **kwargs):
@@ -510,6 +650,11 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         estancia, error = _estancia(request.data.get('estancia'))
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        # Punto del checklist que documenta la foto (se resuelve con la inspección bloqueada:
+        # reemplazar el checklist a la vez no deja la foto apuntando a un punto borrado)
+        punto_pedido = request.data.get('punto')
+        quiere_punto = punto_pedido not in (None, '')
+        punto, aviso = None, None
         descripcion, error = _descripcion(request.data.get('descripcion'))
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
@@ -525,33 +670,194 @@ class InspeccionViewSet(viewsets.ModelViewSet):
                     {"error": "La inspección ya está completada; no admite más evidencias."},
                     status=status.HTTP_409_CONFLICT,
                 )
+            if quiere_punto:
+                punto_pk = _id_entero(punto_pedido)
+                if punto_pk is not None:
+                    punto = PuntoInspeccion.objects.select_related('estancia').filter(
+                        pk=punto_pk, inspeccion=inspeccion,
+                    ).first()
+                if punto is None:
+                    # Sin 400: el móvil apartaría la foto, que es la prueba. Se guarda sin enlazar
+                    aviso = "El punto indicado no es de esta inspección: la foto se guardó sin enlazar a ningún punto."
+                else:
+                    estancia = punto.estancia.nombre
             evidencia = Evidencia.objects.create(
                 inspeccion=inspeccion,
                 foto=foto,
                 descripcion=descripcion,
                 estancia=estancia,
+                punto=punto,
                 hash_sha256=hash_sha256,
                 capturada_en=capturada_en,
                 tsa_timestamp=tsa_data.get('timestamp') if tsa_data else None,
                 tsa_token=tsa_data.get('token') if tsa_data else None,
             )
 
-        return Response(
-            {
-                "id": evidencia.pk,
-                "inspeccion": inspeccion.pk,
-                "descripcion": evidencia.descripcion,
-                "estancia": evidencia.estancia,
-                "hash_sha256": evidencia.hash_sha256,
-                "tsa_applied": bool(evidencia.tsa_token),
-                "tsa_timestamp": evidencia.tsa_timestamp,
-                "audit_token": _build_audit_token(evidencia.pk),
-                "foto": evidencia.foto.url if evidencia.foto else None,
-                "fecha_captura": evidencia.fecha_captura,
-                "capturada_en": evidencia.capturada_en,
-            },
-            status=status.HTTP_201_CREATED,
+        datos = {
+            "id": evidencia.pk,
+            "inspeccion": inspeccion.pk,
+            "descripcion": evidencia.descripcion,
+            "estancia": evidencia.estancia,
+            "punto": evidencia.punto_id,
+            "hash_sha256": evidencia.hash_sha256,
+            "tsa_applied": bool(evidencia.tsa_token),
+            "tsa_timestamp": evidencia.tsa_timestamp,
+            "audit_token": _build_audit_token(evidencia.pk),
+            "foto": evidencia.foto.url if evidencia.foto else None,
+            "fecha_captura": evidencia.fecha_captura,
+            "capturada_en": evidencia.capturada_en,
+        }
+        if aviso:
+            datos["aviso"] = aviso
+            logger.warning(
+                "Foto %s de la inspección %s guardada sin punto: punto pedido %r no válido (usuario %s)",
+                evidencia.pk, inspeccion.pk, str(punto_pedido)[:40], usuario.pk,
+            )
+        return Response(datos, status=status.HTTP_201_CREATED)
+
+
+    def _puede_escribir(self, inspeccion, usuario):
+        """Operario asignado o administrador dueño (como en la subida de fotos)."""
+        return inspeccion.operario_id == usuario.pk or (
+            _is_admin_user(usuario) and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk
         )
+
+    @extend_schema(
+        tags=['checklists'],
+        summary='Checklist de la inspección (GET) o aplicarle una plantilla (POST, administrador)',
+        request=inline_serializer('AplicarChecklist', {
+            'plantilla': drf_serializers.IntegerField(required=False, help_text='Sin ella, la de la propiedad o la por defecto'),
+            'reemplazar': drf_serializers.BooleanField(required=False, help_text='Solo si no hay puntos marcados ni fotos enlazadas'),
+        }),
+        responses={
+            200: OpenApiResponse(description='Estancias y puntos, o {"tiene_checklist": false}'),
+            201: OpenApiResponse(description='Checklist aplicado'),
+            400: OpenApiResponse(description='Plantilla no válida o la propiedad no tiene'),
+            403: OpenApiResponse(description='Solo el administrador dueño aplica plantillas'),
+            404: OpenApiResponse(description='La inspección no existe o no es tuya'),
+            409: OpenApiResponse(description='Completada, ya tiene checklist o ya hay marcas'),
+        },
+    )
+    @action(detail=True, methods=['get', 'post'], url_path='checklist')
+    def checklist(self, request, pk=None):
+        inspeccion = self.get_object()
+        if request.method == 'GET':
+            return Response(_datos_checklist(inspeccion))
+
+        usuario = request.user
+        if not (_is_admin_user(usuario) and getattr(inspeccion.propiedad.owner, 'pk', None) == usuario.pk):
+            return Response({"error": "Solo el administrador dueño aplica plantillas."}, status=status.HTTP_403_FORBIDDEN)
+        if request.data.get('plantilla') not in (None, ''):
+            plantilla, error = _plantilla_propia(request.data.get('plantilla'), usuario)
+            if error:
+                return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            plantilla = plantilla_efectiva(inspeccion.propiedad)
+            if plantilla is None:
+                return Response(
+                    {"error": "La propiedad no tiene plantilla de checklist y no hay una por defecto."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        reemplazar = request.data.get('reemplazar', False)
+        if not isinstance(reemplazar, bool):
+            return Response({"error": "reemplazar debe ser true o false."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            estado = Inspeccion.objects.select_for_update().values_list('estado', flat=True).get(pk=inspeccion.pk)
+            if estado == Inspeccion.Estado.COMPLETADA:
+                return Response({"error": "La inspección ya está completada."}, status=status.HTTP_409_CONFLICT)
+            existente = ChecklistInspeccion.objects.filter(inspeccion=inspeccion).first()
+            if existente is not None:
+                if not reemplazar:
+                    return Response({"error": "La inspección ya tiene checklist."}, status=status.HTTP_409_CONFLICT)
+                usados = PuntoInspeccion.objects.filter(inspeccion=inspeccion).filter(
+                    Q(resultado__isnull=False) | Q(evidencias__isnull=False)
+                ).exists()
+                if usados:
+                    return Response(
+                        {"error": "Ya hay puntos marcados o con fotos: no se puede reemplazar el checklist."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                existente.delete()
+            instanciar_checklist(inspeccion, plantilla)
+        return Response(_datos_checklist(inspeccion), status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        tags=['checklists'],
+        summary='Marcar un punto del checklist (OK, DANO, NO_APLICA o null para desmarcar)',
+        parameters=[OpenApiParameter('punto_id', OpenApiTypes.INT, OpenApiParameter.PATH)],
+        request=inline_serializer('MarcarPunto', {
+            'resultado': drf_serializers.ChoiceField(choices=PuntoInspeccion.Resultado.choices, allow_null=True, required=False),
+            'nota': drf_serializers.CharField(required=False, allow_blank=True),
+            'marcado_en_dispositivo': drf_serializers.DateTimeField(
+                required=False, help_text='Hora del móvil: si es anterior a la marca guardada, no se aplica'),
+        }),
+        responses={
+            200: OpenApiResponse(description='{"aplicado": bool, "punto": {...}}; aplicado=false si había una marca más reciente'),
+            400: OpenApiResponse(description='Datos no válidos'),
+            403: OpenApiResponse(description='Sin permisos'),
+            404: OpenApiResponse(description='La inspección o el punto no existen o no son tuyos'),
+            409: OpenApiResponse(description='La inspección está completada'),
+        },
+    )
+    @action(detail=True, methods=['patch'], url_path=r'checklist/puntos/(?P<punto_id>\d+)')
+    def marcar_punto(self, request, pk=None, punto_id=None):
+        inspeccion = self.get_object()
+        punto_id = _id_entero(punto_id)
+        if punto_id is None:
+            return Response({"error": "El punto no existe en esta inspección."}, status=status.HTTP_404_NOT_FOUND)
+        usuario = request.user
+        if not self._puede_escribir(inspeccion, usuario):
+            return Response({"error": "No tienes permisos para marcar puntos de esta inspección."},
+                            status=status.HTTP_403_FORBIDDEN)
+        if inspeccion.operario_id != usuario.pk and _operario_ajeno(inspeccion.operario, usuario):
+            return Response({"error": ERROR_OPERARIO_AJENO}, status=status.HTTP_400_BAD_REQUEST)
+
+        cambios = {}
+        if 'resultado' in request.data:
+            resultado = request.data.get('resultado')
+            if resultado is not None and resultado not in PuntoInspeccion.Resultado.values:
+                return Response({"error": "resultado debe ser OK, DANO, NO_APLICA o null."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            cambios['resultado'] = resultado
+        if 'nota' in request.data:
+            nota, error = _descripcion(request.data.get('nota'))
+            if error:
+                return Response({"error": error.replace('descripcion', 'nota', 1)}, status=status.HTTP_400_BAD_REQUEST)
+            cambios['nota'] = nota
+        if not cambios:
+            return Response({"error": "Indica resultado o nota."}, status=status.HTTP_400_BAD_REQUEST)
+        dispositivo, error = _capturada_en(request.data.get('marcado_en_dispositivo'))
+        if error:
+            return Response({"error": error.replace('capturada_en', 'marcado_en_dispositivo', 1)},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # Primero la inspección, como la subida y el completado: sin interbloqueos
+            estado = Inspeccion.objects.select_for_update().values_list('estado', flat=True).get(pk=inspeccion.pk)
+            if estado == Inspeccion.Estado.COMPLETADA:
+                return Response({"error": "La inspección ya está completada; el checklist no se puede cambiar."},
+                                status=status.HTTP_409_CONFLICT)
+            punto = (
+                PuntoInspeccion.objects.select_for_update()
+                .filter(pk=punto_id, inspeccion=inspeccion).first()
+            )
+            if punto is None:
+                return Response({"error": "El punto no existe en esta inspección."}, status=status.HTTP_404_NOT_FOUND)
+            # Cola sin conexión: una marca más antigua que llega tarde no pisa la vigente.
+            # No es un error: el móvil la da por sincronizada
+            if dispositivo and punto.marcado_en_dispositivo and dispositivo < punto.marcado_en_dispositivo:
+                return Response({"aplicado": False, "motivo": "marca_mas_reciente", "punto": _datos_punto(punto)})
+            for campo, valor in cambios.items():
+                setattr(punto, campo, valor)
+            punto.marcado_en = timezone.now()
+            punto.marcado_por = usuario
+            # Sin hora del móvil (p. ej. el admin) se conserva la anterior: si no, una marca
+            # vieja de la cola sin conexión pisaría luego la vigente
+            if dispositivo:
+                punto.marcado_en_dispositivo = dispositivo
+            punto.save(update_fields=[*cambios, 'marcado_en', 'marcado_por', 'marcado_en_dispositivo'])
+        return Response({"aplicado": True, "punto": _datos_punto(punto)})
 
 
 class EvidenceAuditView(APIView):
