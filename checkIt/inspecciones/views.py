@@ -21,7 +21,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
 from django.shortcuts import get_object_or_404
-from .models import ESTANCIA_MAX, Evidencia
+from .models import ESTANCIA_MAX, Evidencia, motivo_descripcion_no_valida
 from django.http import HttpResponse
 from django.db import transaction
 from django.conf import settings
@@ -106,6 +106,20 @@ def _estancia(valor):
     if len(texto) > ESTANCIA_MAX:
         return None, f"estancia no puede tener más de {ESTANCIA_MAX} caracteres."
     return texto or None, None
+
+
+def _descripcion(valor):
+    """Descripción libre de la foto (opcional). Devuelve (texto, error); sin texto, ''."""
+    if valor is None:
+        return '', None
+    if not isinstance(valor, str):
+        return '', "descripcion debe ser texto."
+    # NFC: «ñ» compuesta cuenta como un carácter, como la ve el operario
+    texto = unicodedata.normalize('NFC', valor).replace('\r\n', '\n').replace('\r', '\n').strip()
+    motivo = motivo_descripcion_no_valida(texto)
+    if motivo:
+        return '', motivo
+    return texto, None
 
 
 def _capturada_en(valor):
@@ -499,6 +513,9 @@ class InspeccionViewSet(viewsets.ModelViewSet):
         estancia, error = _estancia(request.data.get('estancia'))
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        descripcion, error = _descripcion(request.data.get('descripcion'))
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
         # La TSA se consulta antes del bloqueo para no retener la fila durante la llamada de red
         tsa_data = solicitar_sello_tiempo(hash_sha256) if hash_sha256 else None
 
@@ -514,7 +531,7 @@ class InspeccionViewSet(viewsets.ModelViewSet):
             evidencia = Evidencia.objects.create(
                 inspeccion=inspeccion,
                 foto=foto,
-                descripcion=request.data.get('descripcion') or '',
+                descripcion=descripcion,
                 estancia=estancia,
                 hash_sha256=hash_sha256,
                 capturada_en=capturada_en,

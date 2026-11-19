@@ -18,6 +18,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from ..models import caracter_prohibido_en_descripcion
+
 # ── Paleta ──────────────────────────────────────────────────────────────────
 PRIMARY = colors.HexColor('#1a3a5c')
 ACCENT = colors.HexColor('#e8f0fe')
@@ -92,10 +94,18 @@ def _host(url):
     return urlparse(url).hostname or url or '—'
 
 
+def _descripcion_para_acta(texto):
+    """Descripción escapada para Paragraph, con sus saltos de línea. Quita lo que la API
+    ya rechaza (dirección del texto, invisibles…) por si quedan filas de antes de la regla."""
+    limpio = ''.join(c for c in (texto or '') if not caracter_prohibido_en_descripcion(c) or c == '\r')
+    limpio = limpio.replace('\r\n', '\n').replace('\r', '\n').strip()
+    return escape(limpio).replace('\n', '<br/>')
+
+
 def _texto_evidencia(ev):
     """Estancia y descripción de una foto. Las escribe el operario: se escapan, porque
     Paragraph interpreta marcado, y se dice que la estancia no está sellada."""
-    descripcion = escape(ev.descripcion or 'Sin descripción')
+    descripcion = _descripcion_para_acta(ev.descripcion) or 'Sin descripción'
     if not ev.estancia:
         return descripcion
     return (

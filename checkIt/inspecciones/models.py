@@ -1,7 +1,9 @@
 import os
 import secrets
+import unicodedata
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 # Create your models here.
@@ -121,13 +123,47 @@ def ruta_evidencia(instance, filename):
 
 # Largo máximo de la estancia que declara el operario (p. ej. «Dormitorio 2»)
 ESTANCIA_MAX = 60
+# Largo máximo de la descripción de cada foto (unas 150–200 palabras)
+DESCRIPCION_MAX = 1000
+
+# Saltos que se admiten en la descripción (\r solo llega del textarea del admin;
+# la API lo convierte en \n)
+_SALTOS_DESCRIPCION = frozenset('\n\r\t')
+# Formato que sí escribe un teclado: ZWNJ y ZWJ (emojis compuestos). El resto de Cf
+# (dirección del texto, ancho cero, etiquetas Unicode…) invierte o esconde texto
+_FORMATO_PERMITIDO = frozenset('\u200c\u200d')
+# Cs: un sustituto suelto no se puede guardar en Postgres
+_CATEGORIAS_PROHIBIDAS = frozenset({'Cc', 'Cf', 'Cs', 'Zl', 'Zp'})
+
+
+def caracter_prohibido_en_descripcion(c):
+    return (
+        unicodedata.category(c) in _CATEGORIAS_PROHIBIDAS
+        and c not in _SALTOS_DESCRIPCION
+        and c not in _FORMATO_PERMITIDO
+    )
+
+
+def motivo_descripcion_no_valida(texto):
+    """Por qué no vale una descripción, o None. La usan la API y full_clean (admin)."""
+    if any(caracter_prohibido_en_descripcion(c) for c in texto):
+        return "descripcion no puede contener caracteres de control, invisibles ni de dirección del texto."
+    if len(texto) > DESCRIPCION_MAX:
+        return f"descripcion no puede tener más de {DESCRIPCION_MAX} caracteres."
+    return None
+
+
+def validar_descripcion(valor):
+    motivo = motivo_descripcion_no_valida(valor or '')
+    if motivo:
+        raise ValidationError(motivo)
 
 
 # Modelo para almacenar evidencias (fotos) de las inspecciones
 class Evidencia(models.Model):
     inspeccion = models.ForeignKey(Inspeccion, on_delete=models.CASCADE, related_name="evidencias")
     foto = models.ImageField(upload_to=ruta_evidencia)
-    descripcion = models.TextField(blank=True, null=True)
+    descripcion = models.TextField(blank=True, null=True, validators=[validar_descripcion])
     # La declara el operario y queda fuera del manifiesto sellado, como la descripción.
     # Nullable: las fotos anteriores no la tienen, y las instancias viejas del deploy
     # insertan sin conocer la columna
