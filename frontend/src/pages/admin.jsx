@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../services/api";
 import IntegracionesPanel from "../components/integraciones/IntegracionesPanel";
+import PlantillasPanel from "../components/checklists/PlantillasPanel";
+import { aplicarChecklist, listarPlantillas } from "../services/checklists";
+import { motivoDelRechazo } from "../services/erroresSubida";
 import { clearAuthTokens } from "../services/authStorage";
 
 // Catálogo de estilos/etiquetas para pintar el estado de cada inspección en tabla.
@@ -78,6 +81,8 @@ const PROP_EMPTY = {
   direccion: "",
   descripcion: "",
   external_id: "",
+  // "" = la plantilla por defecto del cliente (se manda null)
+  plantilla_checklist: "",
 };
 const OP_EMPTY = {
   username: "",
@@ -95,6 +100,23 @@ export default function AdminPage() {
   const [inspections, setInspections] = useState([]);
   const [propiedades, setPropiedades] = useState([]);
   const [operarios, setOperarios] = useState([]);
+  // Plantillas de checklist (#19): para elegir en la propiedad y aplicar a inspecciones
+  const [plantillas, setPlantillas] = useState([]);
+  // Sin plantillas cargadas, el selector de la propiedad mentiría («por defecto: ninguna»)
+  const [plantillasError, setPlantillasError] = useState(false);
+  const cargarPlantillas = useCallback(
+    () =>
+      listarPlantillas()
+        .then((lista) => {
+          setPlantillas(lista);
+          setPlantillasError(false);
+        })
+        .catch((e) => {
+          console.warn("No se pudieron cargar las plantillas de checklist", e);
+          setPlantillasError(true);
+        }),
+    [],
+  );
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(null);
   // Una descarga a la vez (el state llega tarde para frenar un doble clic) y su
@@ -127,7 +149,30 @@ export default function AdminPage() {
       .catch(() => setError("No se pudieron cargar las inspecciones."));
     api.get("/propiedades/").then((res) => setPropiedades(res.data));
     api.get("/usuarios/operarios/").then((res) => setOperarios(res.data));
-  }, []);
+    cargarPlantillas();
+  }, [cargarPlantillas]);
+
+  const cargarInspecciones = () =>
+    api
+      .get("/inspecciones/")
+      .then((res) => setInspections(res.data))
+      .catch(() => setError("No se pudieron cargar las inspecciones."));
+
+  // Copia la plantilla de su propiedad (o la por defecto) a una inspección abierta sin checklist
+  const handleAplicarChecklist = async (id) => {
+    setError(null);
+    try {
+      await aplicarChecklist(id);
+      cargarInspecciones();
+    } catch (err) {
+      const status = err?.response?.status;
+      setError(
+        status && status < 500
+          ? `No se pudo aplicar el checklist: ${motivoDelRechazo(err, "la acción")}`
+          : "No se pudo aplicar el checklist. Inténtalo de nuevo.",
+      );
+    }
+  };
 
   useEffect(() => {
     // Primera hidratación de datos al montar la pantalla.
@@ -297,6 +342,7 @@ export default function AdminPage() {
       direccion: p.direccion,
       descripcion: p.descripcion || "",
       external_id: p.external_id || "",
+      plantilla_checklist: p.plantilla_checklist ?? "",
     });
     setPropErrors({});
     setShowPropForm(true);
@@ -308,10 +354,14 @@ export default function AdminPage() {
     setPropErrors({});
     setPropSaving(true);
     try {
+      const datos = {
+        ...propForm,
+        plantilla_checklist: propForm.plantilla_checklist === "" ? null : Number(propForm.plantilla_checklist),
+      };
       if (editingProp) {
-        await api.put(`/propiedades/${editingProp}/`, propForm);
+        await api.put(`/propiedades/${editingProp}/`, datos);
       } else {
-        await api.post("/propiedades/", propForm);
+        await api.post("/propiedades/", datos);
       }
       setShowPropForm(false);
       setPropForm(PROP_EMPTY);
@@ -405,6 +455,7 @@ export default function AdminPage() {
             { id: "inspecciones", label: "Inspecciones" },
             { id: "propiedades", label: "Propiedades" },
             { id: "operarios", label: "Operarios" },
+            { id: "checklists", label: "Checklists" },
             { id: "integraciones", label: "Integraciones" },
           ].map((t) => (
             <button
@@ -570,6 +621,13 @@ export default function AdminPage() {
                           >
                             {badge.label}
                           </span>
+                          {insp.checklist_resumen && (
+                            <span className="block mt-1 text-xs text-slate-500">
+                              {`${insp.checklist_resumen.puntos - insp.checklist_resumen.sin_marcar} de ${insp.checklist_resumen.puntos} puntos`}
+                              {insp.checklist_resumen.danos > 0 &&
+                                ` · ${insp.checklist_resumen.danos} ${insp.checklist_resumen.danos === 1 ? "daño" : "daños"}`}
+                            </span>
+                          )}
                         </td>
                         <td className="px-5 py-3.5">
                           {insp.estado === "COMPLETADA" ? (
@@ -595,9 +653,21 @@ export default function AdminPage() {
                               </button>
                             </div>
                           ) : (
-                            <span className="text-slate-400 text-xs italic">
-                              Pendiente de operario
-                            </span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-slate-400 text-xs italic">
+                                Pendiente de operario
+                              </span>
+                              {!insp.checklist_resumen && plantillas.length > 0 && (
+                                <button
+                                  type="button"
+                                  aria-label={`Aplicar checklist a la inspección ${insp.id}`}
+                                  onClick={() => handleAplicarChecklist(insp.id)}
+                                  className="min-h-8 px-2 rounded text-xs font-semibold text-blue-700 hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                                >
+                                  Aplicar checklist
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -740,6 +810,42 @@ export default function AdminPage() {
                       </p>
                     )}
                   </div>
+                  <div>
+                    <label
+                      htmlFor="prop-plantilla"
+                      className="block text-xs font-medium text-slate-500 mb-1"
+                    >
+                      Plantilla de checklist
+                    </label>
+                    {plantillasError && (
+                      <p role="alert" className="mb-1 text-xs text-red-700">
+                        No se pudieron cargar las plantillas.{" "}
+                        <button type="button" onClick={cargarPlantillas} className="font-semibold underline">
+                          Reintentar
+                        </button>
+                      </p>
+                    )}
+                    <select
+                      id="prop-plantilla"
+                      disabled={plantillasError}
+                      aria-invalid={propErrors.plantilla_checklist ? true : undefined}
+                      value={propForm.plantilla_checklist}
+                      onChange={(e) =>
+                        setPropForm((f) => ({ ...f, plantilla_checklist: e.target.value }))
+                      }
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                    >
+                      <option value="">
+                        {`Por defecto del cliente (${plantillas.find((p) => p.por_defecto)?.nombre ?? "ninguna"})`}
+                      </option>
+                      {plantillas.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.nombre}
+                        </option>
+                      ))}
+                    </select>
+                    {fieldErr(propErrors, "plantilla_checklist")}
+                  </div>
                 </div>
                 {propErrors.non_field_errors && (
                   <p className="mt-2 text-xs text-red-600">
@@ -800,6 +906,11 @@ export default function AdminPage() {
                       <tr key={p.id} className="hover:bg-slate-50 transition">
                         <td className="px-5 py-3.5 font-medium text-slate-800">
                           {p.nombre}
+                          <span className="block text-xs font-normal text-slate-400">
+                            {p.plantilla_efectiva
+                              ? `Checklist: ${p.plantilla_efectiva.nombre}${p.plantilla_efectiva.origen === "defecto" ? " (por defecto)" : ""}`
+                              : "Sin checklist"}
+                          </span>
                         </td>
                         <td className="px-5 py-3.5 text-slate-500">
                           {p.direccion}
@@ -1010,6 +1121,7 @@ export default function AdminPage() {
         )}
 
         {/* ── TAB: Integraciones ───────────────────────────────────────────── */}
+        {tab === "checklists" && <PlantillasPanel onCambio={cargarPlantillas} />}
         {tab === "integraciones" && <IntegracionesPanel />}
       </main>
     </div>
