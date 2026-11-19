@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 # Create your models here.
-from propiedades.models import Propiedad
+from propiedades.models import PlantillaChecklist, Propiedad
 from django.conf import settings
 
 def generar_clave_verificacion():
@@ -168,6 +168,11 @@ class Evidencia(models.Model):
     # Nullable: las fotos anteriores no la tienen, y las instancias viejas del deploy
     # insertan sin conocer la columna
     estancia = models.CharField(max_length=ESTANCIA_MAX, blank=True, null=True)
+    # Punto del checklist que documenta (#19). RESTRICT: no se borra un punto con fotos, pero
+    # sí la inspección entera (la cascada borra la foto en la misma operación)
+    punto = models.ForeignKey(
+        'PuntoInspeccion', on_delete=models.RESTRICT, null=True, blank=True, related_name='evidencias',
+    )
     # Pese al nombre, es la hora en que el servidor recibió la foto
     fecha_captura = models.DateTimeField(auto_now_add=True)
     # Hora de la foto según el dispositivo: la declara el cliente, nadie la certifica
@@ -189,6 +194,13 @@ class Evidencia(models.Model):
             avisos.append('posterior a la recepción')
         return avisos
 
+    def clean(self):
+        super().clean()
+        # Una foto solo documenta puntos de su propia inspección: si no, contaría para las
+        # faltas y el acta de otra (quizá de otro cliente)
+        if self.punto_id and self.punto.inspeccion_id != self.inspeccion_id:
+            raise ValidationError({'punto': 'El punto no es de esta inspección.'})
+
     class Meta:
         indexes = [
             # El verificador público busca por hash
@@ -204,3 +216,75 @@ class Evidencia(models.Model):
     def __str__(self):
         return f"Evidencia de {self.inspeccion} tomada por {self.inspeccion.operario.username if self.inspeccion.operario else 'Sin operario'} el {self.fecha_captura.strftime('%Y-%m-%d %H:%M:%S')}"
     
+
+
+# ── Checklist de la inspección (#19) ───────────────────────────────────────
+# Copia fija de la plantilla al crear la inspección: editar o borrar la plantilla no la
+# cambia. Va en tablas propias (no en Inspeccion) y queda fuera del manifiesto sellado,
+# como la estancia y la descripción: sale en el acta firmada y en el paquete.
+
+class ChecklistInspeccion(models.Model):
+    inspeccion = models.OneToOneField(Inspeccion, on_delete=models.CASCADE, related_name='checklist')
+    plantilla = models.ForeignKey(
+        PlantillaChecklist, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    # Copia: sobrevive al borrado de la plantilla
+    plantilla_nombre = models.CharField(max_length=100)
+    plantilla_version = models.PositiveIntegerField()
+    formato = models.PositiveSmallIntegerField(default=1)
+    creado = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Checklist «{self.plantilla_nombre}» de la inspección {self.inspeccion_id}"
+
+
+class EstanciaInspeccion(models.Model):
+    checklist = models.ForeignKey(ChecklistInspeccion, on_delete=models.CASCADE, related_name='estancias')
+    orden = models.PositiveSmallIntegerField()
+    nombre = models.CharField(max_length=ESTANCIA_MAX)
+
+    class Meta:
+        ordering = ['orden']
+        constraints = [
+            models.UniqueConstraint(fields=['checklist', 'orden'], name='estancia_inspeccion_orden_unico'),
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+
+class PuntoInspeccion(models.Model):
+    class Resultado(models.TextChoices):
+        OK = 'OK', 'OK'
+        DANO = 'DANO', 'Daño'
+        NO_APLICA = 'NO_APLICA', 'No aplica'
+
+    estancia = models.ForeignKey(EstanciaInspeccion, on_delete=models.CASCADE, related_name='puntos')
+    # Repetida a propósito: comprobar que un punto es de una inspección y resumir sin joins
+    inspeccion = models.ForeignKey(Inspeccion, on_delete=models.CASCADE, related_name='puntos_checklist')
+    orden = models.PositiveSmallIntegerField()
+    texto = models.CharField(max_length=200)
+    requiere_foto = models.BooleanField(default=False)
+    # Sin marcar: null
+    resultado = models.CharField(max_length=10, choices=Resultado.choices, null=True, blank=True)
+    nota = models.TextField(blank=True, default='', validators=[validar_descripcion])
+    marcado_en = models.DateTimeField(null=True, blank=True)
+    marcado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    # Hora del móvil al marcar: con la cola sin conexión gana la última marca, no la última en llegar
+    marcado_en_dispositivo = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['orden']
+        constraints = [
+            models.UniqueConstraint(fields=['estancia', 'orden'], name='punto_inspeccion_orden_unico'),
+            models.CheckConstraint(
+                check=models.Q(resultado__isnull=True) | models.Q(resultado__in=['OK', 'DANO', 'NO_APLICA']),
+                name='punto_resultado_valido',
+            ),
+        ]
+
+    def __str__(self):
+        return self.texto
+

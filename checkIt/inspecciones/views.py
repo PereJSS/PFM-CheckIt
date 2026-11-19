@@ -30,6 +30,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from typing import cast
 from users.permissions import es_admin
+from core.textos import motivo_texto_corto_no_valido, normalizar_texto_corto
 
 
 MAX_EVIDENCE_SIZE_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -97,14 +98,10 @@ def _estancia(valor):
         return None, None
     if not isinstance(valor, str):
         return None, "estancia debe ser texto."
-    # NFC: «ñ» compuesta cuenta como un carácter, como la ve el operario
-    texto = unicodedata.normalize('NFC', valor).strip()
-    # Control, formato (bidi, ancho cero) y separadores de línea: harían que el acta
-    # mostrase algo distinto de lo guardado
-    if any(unicodedata.category(c) in ('Cc', 'Cf', 'Zl', 'Zp') for c in texto):
-        return None, "estancia no puede contener caracteres de control ni de dirección del texto."
-    if len(texto) > ESTANCIA_MAX:
-        return None, f"estancia no puede tener más de {ESTANCIA_MAX} caracteres."
+    texto = normalizar_texto_corto(valor)
+    motivo = motivo_texto_corto_no_valido(texto, ESTANCIA_MAX, 'estancia')
+    if motivo:
+        return None, motivo
     return texto or None, None
 
 
