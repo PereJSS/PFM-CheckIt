@@ -1,5 +1,6 @@
 import io
 import os
+import unicodedata
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
@@ -102,10 +103,85 @@ def _descripcion_para_acta(texto):
     return escape(limpio).replace('\n', '<br/>')
 
 
+_PROHIBIDOS_CORTO = frozenset({'Cc', 'Cf', 'Cs', 'Zl', 'Zp'})
+_RESULTADO_ACTA = {'OK': 'OK', 'DANO': 'Daño', 'NO_APLICA': 'No aplica', None: 'Sin marcar'}
+
+
+def _corto_para_acta(texto):
+    """Nombre de plantilla, estancia o punto: escapado y sin controles ni invisibles. La API
+    ya los rechaza; esto cubre lo guardado desde el shell o antes de la regla."""
+    return escape(''.join(c for c in (texto or '') if unicodedata.category(c) not in _PROHIBIDOS_CORTO))
+
+
+def _nota_para_tabla(texto):
+    """Nota en una celda: los saltos de línea pasan a « / ». Una fila de Table no se parte
+    entre páginas y cientos de saltos harían imposible generar el acta (LayoutError)."""
+    lineas = [linea.strip() for linea in (texto or '').replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+    return _descripcion_para_acta(' / '.join(linea for linea in lineas if linea))
+
+
+def _seccion_checklist(inspeccion, s, numeros):
+    """Checklist de la inspección (#19). `numeros`: id de evidencia → su número en el acta.
+
+    Declarado por el operario y fuera del manifiesto sellado, como la estancia y la
+    descripción; lo cubre la firma del informe."""
+    from .checklist import checklist_canonico, resumen
+
+    datos = checklist_canonico(inspeccion)
+    if datos is None:
+        return []
+    r = resumen(inspeccion.pk)
+    flowables = [
+        Paragraph('Checklist', s['h2']),
+        Paragraph(
+            f"Plantilla «{_corto_para_acta(datos['plantilla'])}» (versión {datos['plantilla_version']}). "
+            f"{r['puntos']} puntos: {r['ok']} OK, {r['danos']} con daño, "
+            f"{r['no_aplica']} no aplica, {r['sin_marcar']} sin marcar.",
+            s['value'],
+        ),
+        Paragraph(
+            'Declarado por el operario: no forma parte del manifiesto sellado; queda cubierto por '
+            'la firma de este informe. «Fotos» remite a la numeración de las evidencias.',
+            s['small'],
+        ),
+    ]
+    ancho = PAGE_W - 2 * MARGIN
+    for estancia in datos['estancias']:
+        filas = [[Paragraph(f'<b>{titulo}</b>', s['small']) for titulo in ('Punto', 'Resultado', 'Nota', 'Fotos')]]
+        for punto in estancia['puntos']:
+            fotos = ', '.join(f'#{numeros[e]}' for e in punto['evidencias'] if e in numeros) or '—'
+            filas.append([
+                Paragraph(_corto_para_acta(punto['texto']), s['small']),
+                Paragraph(_RESULTADO_ACTA.get(punto['resultado'], escape(str(punto['resultado']))), s['small']),
+                Paragraph(_nota_para_tabla(punto['nota']) or '—', s['small']),
+                Paragraph(fotos, s['small']),
+            ])
+        tabla = Table(filas, colWidths=[5.5 * cm, 2.2 * cm, ancho - 10.2 * cm, 2.5 * cm], repeatRows=1)
+        tabla.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), ACCENT),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_GREY]),
+            ('GRID', (0, 0), (-1, -1), 0.25, MID_GREY),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        flowables.append(Paragraph(f"<b>{_corto_para_acta(estancia['nombre'])}</b>", s['value']))
+        flowables.append(tabla)
+        flowables.append(Spacer(1, 0.2 * cm))
+    return flowables
+
+
 def _texto_evidencia(ev):
     """Estancia y descripción de una foto. Las escribe el operario: se escapan, porque
     Paragraph interpreta marcado, y se dice que la estancia no está sellada."""
     descripcion = _descripcion_para_acta(ev.descripcion) or 'Sin descripción'
+    if ev.punto_id:
+        punto = ev.punto
+        return (
+            f'<b>Punto:</b> {_corto_para_acta(punto.estancia.nombre)} · {_corto_para_acta(punto.texto)} '
+            f'(declarado por el operario) · {descripcion}'
+        )
     if not ev.estancia:
         return descripcion
     return (
@@ -210,7 +286,9 @@ def generar_informe_base(inspeccion, output_path=None):
     ]))
     story.append(Spacer(1, 0.4 * cm))
 
-    evidencias = list(inspeccion.evidencias.all())
+    evidencias = list(inspeccion.evidencias.select_related('punto__estancia'))
+    story.extend(_seccion_checklist(inspeccion, s, {ev.pk: idx for idx, ev in enumerate(evidencias, start=1)}))
+
     story.append(Paragraph(f'Evidencias ({len(evidencias)})', s['h2']))
     if not evidencias:
         story.append(Paragraph('No se registraron evidencias en esta inspección.', s['value']))

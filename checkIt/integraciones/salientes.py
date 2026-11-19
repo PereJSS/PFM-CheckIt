@@ -226,6 +226,11 @@ def construir_datos(tipo, inspeccion):
     manifiesto = _testigo_manifiesto(inspeccion.pk)
     if manifiesto:
         datos['manifiesto'] = manifiesto
+    # #19: recuentos y daños del checklist, sin notas (texto libre con posibles datos personales)
+    from inspecciones.services.checklist import checklist_para_webhook
+    checklist = checklist_para_webhook(inspeccion.pk)
+    if checklist is not None:
+        datos['checklist'] = checklist
     if tipo == EVENTO_PDF_LISTO:
         # Qué manifiesto describe el PDF (puede quedar atrás si se reabre la inspección)
         datos['pdf_manifiesto_raiz'] = inspeccion.pdf_manifiesto_raiz

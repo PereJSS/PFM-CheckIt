@@ -25,6 +25,7 @@ from django.utils import timezone
 from ..models import Inspeccion
 from . import merkle
 from .almacen import abrir_pdf
+from .checklist import checklist_canonico
 from .tsa import PERFIL_EVIDENCIAS, PERFIL_MANIFIESTO, configuracion, url_segura
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,8 @@ def _añadir_evidencias(paquete, inspeccion):
             'descripcion': evidencia.descripcion or '',
             # Declarada por el operario: fuera del manifiesto y sin sello
             'estancia': evidencia.estancia,
+            # Punto del checklist que documenta (#19): declarado, fuera del manifiesto
+            'punto': evidencia.punto_id,
             # Declarada por el dispositivo: fuera del manifiesto y sin sello
             'capturada_en': _iso(evidencia.capturada_en),
             'capturada_en_certificada': False,
@@ -228,6 +231,18 @@ def _añadir_certificados_tsa(paquete):
     return por_perfil
 
 
+def _checklist(inspeccion):
+    datos = checklist_canonico(inspeccion)
+    if datos is None:
+        return None
+    return {
+        'sellado': False,
+        'nota': ('Declarado por el operario: no forma parte del manifiesto sellado. '
+                 'Sale en el informe firmado.'),
+        **datos,
+    }
+
+
 def _expediente(inspeccion, fichas, anteriores, certificados, avisos):
     operario = inspeccion.operario
     return {
@@ -252,6 +267,7 @@ def _expediente(inspeccion, fichas, anteriores, certificados, avisos):
             'tsa_verificado': inspeccion.manifiesto_tsa_verificado,
         },
         'evidencias': fichas,
+        'checklist': _checklist(inspeccion),
         'manifiestos_anteriores': anteriores,
         'certificados_tsa': sorted(set(certificados.values())),
         'avisos': avisos,
@@ -306,7 +322,8 @@ QUÉ CONTIENE
   congelada al completar la inspección, y su raíz Merkle (árbol RFC 6962).
 - manifiesto/raiz.tst: el sello de tiempo RFC 3161 de esa raíz.
 - manifiestos_anteriores/: los manifiestos sellados antes de reabrir la inspección, si los hubo.
-- expediente.json: el resumen de todo lo anterior.
+- expediente.json: el resumen de todo lo anterior y, si la inspección tiene checklist,
+  sus puntos y resultados (declarados por el operario, fuera del manifiesto sellado).
 - SHA256SUMS: el hash de cada archivo del paquete.
 - verificar.py: comprueba hashes, árbol, pruebas de inclusión y la huella de cada sello.
 - verificar_sellos.sh: un comando de openssl por cada sello de tiempo del paquete.

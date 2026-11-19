@@ -105,6 +105,10 @@ def resumen(inspeccion_id):
     """Recuento por resultado, o None si la inspección no tiene checklist."""
     if not ChecklistInspeccion.objects.filter(inspeccion_id=inspeccion_id).exists():
         return None
+    return _recuento(inspeccion_id)
+
+
+def _recuento(inspeccion_id):
     R = PuntoInspeccion.Resultado
     return PuntoInspeccion.objects.filter(inspeccion_id=inspeccion_id).aggregate(
         puntos=Count('id'),
@@ -148,5 +152,36 @@ def checklist_canonico(inspeccion):
                 ],
             }
             for estancia in checklist.estancias.all()
+        ],
+    }
+
+
+def checklist_para_webhook(inspeccion_id):
+    """Bloque `checklist` del webhook saliente: recuentos y daños, sin notas (texto libre
+    que puede llevar datos personales). None si no hay checklist."""
+    checklist = ChecklistInspeccion.objects.filter(inspeccion_id=inspeccion_id).first()
+    if checklist is None:
+        return None
+    danos = (
+        PuntoInspeccion.objects.filter(inspeccion_id=inspeccion_id, resultado=PuntoInspeccion.Resultado.DANO)
+        .select_related('estancia')
+        .prefetch_related(Prefetch('evidencias', queryset=Evidencia.objects.order_by('pk').only('pk', 'punto_id')))
+        .order_by('estancia__orden', 'orden')
+    )
+    # Se llama por cada evento: el checklist ya leído no se vuelve a comprobar, y sin
+    # daños no se consultan
+    recuento = _recuento(inspeccion_id)
+    return {
+        'plantilla': checklist.plantilla_nombre,
+        'plantilla_version': checklist.plantilla_version,
+        **recuento,
+        'lista_danos': [
+            {
+                'punto_id': p.pk,
+                'estancia': p.estancia.nombre,
+                'punto': p.texto,
+                'evidencias': [ev.pk for ev in p.evidencias.all()],
+            }
+            for p in (danos if recuento['danos'] else [])
         ],
     }

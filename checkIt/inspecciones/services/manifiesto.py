@@ -90,6 +90,7 @@ def reabrir_manifiesto(inspeccion_id):
     """Al salir de COMPLETADA: archiva el manifiesto sellado (si lo hay), deja los campos
     vacíos y lo anuncia en la misma transacción."""
     from ..signals import anunciar, manifiesto_reabierto
+    from .checklist import checklist_canonico
 
     with transaction.atomic():
         inspeccion = Inspeccion.objects.select_for_update().filter(pk=inspeccion_id).first()
@@ -109,6 +110,10 @@ def reabrir_manifiesto(inspeccion_id):
                 'tsa_verificado': inspeccion.manifiesto_tsa_verificado,
                 'archivado': timezone.now().isoformat(),
             })
+            # El checklist tal como estaba al completar (fuera del sello, como en el acta)
+            checklist = checklist_canonico(inspeccion)
+            if checklist is not None:
+                anteriores[-1]['checklist'] = checklist
         Inspeccion.objects.filter(pk=inspeccion_id).update(manifiestos_anteriores=anteriores, **_CAMPOS_VACIOS)
         # El PMS que guardó la raíz sabe que ya no vale. También sin sello: la raíz
         # pudo salir en inspeccion.completada.

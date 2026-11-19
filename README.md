@@ -296,6 +296,21 @@ Base URL: /api/v1
 
 Cada propiedad admite un `external_id` opcional (único por admin): el identificador de esa propiedad en el PMS del cliente, usado para enlazar los webhooks entrantes.
 
+Cada propiedad admite también `plantilla_checklist` (una plantilla del mismo admin, o `null`) y devuelve `plantilla_efectiva`: la que usarán sus inspecciones nuevas (`origen`: `propiedad` o `defecto`).
+
+### Checklists (#19)
+
+| Método    | Ruta                                  | Descripción                                                     | Auth        |
+| --------- | ------------------------------------- | --------------------------------------------------------------- | ----------- |
+| GET/POST  | /plantillas-checklist/                | Lista o crea plantillas (solo JSON)                             | JWT (admin) |
+| GET/PUT/PATCH/DELETE | /plantillas-checklist/{id}/ | Detalle, edición (exige `version`; 409 si cambió) o borrado     | JWT (owner) |
+| POST      | /plantillas-checklist/{id}/duplicar/  | Copia con nombre «… (copia)»                                    | JWT (owner) |
+| GET       | /inspecciones/{id}/checklist/         | Estancias y puntos, o `{"tiene_checklist": false}`              | JWT con alcance por rol |
+| POST      | /inspecciones/{id}/checklist/         | Aplica una plantilla a una inspección abierta (`reemplazar` solo sin marcas ni fotos) | JWT (admin propietario) |
+| PATCH     | /inspecciones/{id}/checklist/puntos/{punto}/ | Marca `OK`, `DANO`, `NO_APLICA` o `null`, con `nota` y `marcado_en_dispositivo` | JWT (operario asignado o admin propietario) |
+
+Una plantilla es `{"estancias": [{"nombre", "puntos": [{"texto", "requiere_foto"}]}]}` (1–40 estancias, 1–40 puntos por estancia, 400 en total). Al crear una inspección (admin o checkout del PMS) se copia la plantilla de la propiedad o la por defecto del cliente; editar o borrar la plantilla después no cambia esa copia. Sin plantilla, la inspección funciona como antes. Con checklist, completar da `409` con `faltas` mientras haya puntos sin marcar, daños sin foto o puntos con `requiere_foto` sin foto. Una foto se enlaza a un punto con el campo `punto` de la subida; si el punto no es de la inspección, la foto se guarda sin enlazar y la respuesta trae `aviso`. El checklist lo declara el operario: sale en el acta firmada y en `expediente.json` (`"sellado": false`), pero no entra en el manifiesto sellado. Al reabrir una inspección con el manifiesto sellado, su estado se archiva en `manifiestos_anteriores` (sin sello, no hay registro que archivar). El acta y el paquete leen el checklist vigente al generarse: mientras la inspección está completada no se puede cambiar.
+
 ### Inspecciones y evidencias
 
 | Método    | Ruta                             | Descripción                          | Auth                                        |
@@ -411,6 +426,8 @@ Payload:
                          "tsa_url": "https://freetsa.org/tsr", "tsa_cualificada": false, "tsa_verificado": true,
                          "raiz_anterior": null}}}
 ```
+
+**Checklist.** Si la inspección tiene checklist, `data` lleva el bloque `checklist`: `plantilla`, `plantilla_version`, los recuentos (`puntos`, `ok`, `danos`, `no_aplica`, `sin_marcar`) y `lista_danos` (`punto_id`, `estancia`, `punto`, `evidencias`). No lleva las notas del operario, que son texto libre y pueden contener datos personales.
 
 **Testigo externo de la raíz.** El bloque `manifiesto` va en todos los eventos desde que la inspección se completa (`tsa_*` en `null` hasta que se sella). Así el PMS guarda una copia de la raíz fuera del control de CheckIt. Para que sirva de testigo, el receptor debe:
 
