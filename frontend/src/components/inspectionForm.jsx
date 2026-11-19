@@ -2,9 +2,22 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { calculateSHA256 } from "../utils/hash";
 import { horaDeArchivo } from "../utils/hora";
 import {
+  getMarcasPendientes,
   getPendingEvidencesByInspection,
+  guardarChecklistCache,
+  guardarMarcaOffline,
+  leerChecklistCache,
+  quitarMarcaOffline,
   saveEvidenceOffline,
 } from "../services/offline";
+import {
+  faltasLocales,
+  marcarPunto,
+  obtenerChecklist,
+  superponerMarcas,
+  textoFaltas,
+} from "../services/checklists";
+import ChecklistFlow from "./ChecklistFlow";
 import api from "../services/api";
 import {
   DESCRIPCION_MAX,
@@ -307,16 +320,161 @@ function CameraModal({ onCapture, onClose }) {
   );
 }
 
+// Avisos del flujo: las regiones viven siempre montadas para que los lectores de
+// pantalla anuncien cada cambio (un role=status recién insertado se anuncia mal)
+function AvisoEstado({ status }) {
+  const clase = (tipo) =>
+    `mt-4 px-4 py-3 rounded-lg text-sm font-medium ${
+      tipo === "success"
+        ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+        : tipo === "error"
+          ? "bg-red-50 text-red-800 border border-red-200"
+          : "bg-blue-50 text-blue-800 border border-blue-200"
+    }`;
+  return (
+    <>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {status && status.type !== "error" && <p className={clase(status.type)}>{status.text}</p>}
+      </div>
+      <div role="alert" aria-atomic="true">
+        {status?.type === "error" && <p className={clase("error")}>{status.text}</p>}
+      </div>
+    </>
+  );
+}
+
 // ── Formulario principal ───────────────────────────────────────────────────
-export default function InspectionForm({ inspectionId }) {
+export default function InspectionForm({ inspectionId, recarga = 0 }) {
   // Estado del flujo en 2 pasos: elegir estancia y registrar evidencia.
   const [step, setStep] = useState(1);
-  const [room, setRoom] = useState("");
+  const [estanciaElegida, setRoom] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   // Input oculto para abrir cámara nativa en móvil.
   const fileInputRef = useRef(null);
+  // Checklist de la inspección (#19): null mientras carga; sin checklist, el flujo de siempre
+  const [checklist, setChecklist] = useState(null);
+  // Fotos de cada punto guardadas en el móvil sin subir: cuentan para las faltas
+  const [fotosPendientes, setFotosPendientes] = useState({});
+  // Punto al que irá la próxima foto (la cámara se abre fuera de este render)
+  const puntoFoto = useRef(null);
+
+  // ok | movil (copia guardada en el móvil) | error (no se pudo leer)
+  const [cargaChecklist, setCargaChecklist] = useState("cargando");
+  const [reintentos, setReintentos] = useState(0);
+  // Por punto, la última marca hecha: una respuesta o un rechazo tardío de una anterior no la pisa
+  const secuencia = useRef({});
+
+  useEffect(() => {
+    let vigente = true;
+    const conMarcasPendientes = (datos) =>
+      getMarcasPendientes(inspectionId)
+        .catch(() => [])
+        .then((marcas) => superponerMarcas(datos, marcas));
+    obtenerChecklist(inspectionId)
+      .then((datos) => {
+        guardarChecklistCache(inspectionId, datos).catch((e) =>
+          console.warn("No se pudo guardar el checklist en el móvil", e),
+        );
+        return conMarcasPendientes(datos).then((d) => {
+          if (!vigente) return;
+          setChecklist(d);
+          setCargaChecklist("ok");
+        });
+      })
+      .catch((error) => {
+        // Sin red o con el servidor caído: la copia de este móvil. Otro error (403, 404…) no
+        const sinServidor = !error?.response || error.response.status >= 500;
+        const guardado = sinServidor ? leerChecklistCache(inspectionId).catch(() => null) : Promise.resolve(null);
+        return guardado
+          .then((datos) => (datos ? conMarcasPendientes(datos) : null))
+          .then((d) => {
+            if (!vigente) return;
+            if (d) {
+              setChecklist(d);
+              setCargaChecklist("movil");
+            } else {
+              console.error("No se pudo cargar el checklist de la inspección", error);
+              setChecklist({ tiene_checklist: false });
+              setCargaChecklist("error");
+            }
+          });
+      });
+    getPendingEvidencesByInspection(inspectionId)
+      .then((pendientes) => {
+        const porPunto = {};
+        for (const ev of pendientes) if (ev.punto) porPunto[ev.punto] = (porPunto[ev.punto] || 0) + 1;
+        if (vigente) setFotosPendientes(porPunto);
+      })
+      .catch((e) => console.warn("No se pudieron leer las fotos guardadas en el móvil", e));
+    return () => {
+      vigente = false;
+    };
+  }, [inspectionId, recarga, reintentos]);
+
+  const actualizarPunto = (puntoId, cambios) =>
+    setChecklist((actual) =>
+      actual && {
+        ...actual,
+        estancias: actual.estancias.map((e) => ({
+          ...e,
+          puntos: e.puntos.map((p) => (p.id === puntoId ? { ...p, ...cambios } : p)),
+        })),
+      },
+    );
+
+  // Marca optimista: se ve al momento; sin red queda en el móvil y se sube después
+  const marcar = async (punto, cambios) => {
+    const id = punto.id;
+    const mia = (secuencia.current[id] || 0) + 1;
+    secuencia.current[id] = mia;
+    const esLaUltima = () => secuencia.current[id] === mia;
+    // Solo se deshace lo que cambió esta marca (no la nota si se marcó el resultado)
+    const anterior = Object.fromEntries(
+      Object.keys(cambios).map((k) => [k, k === "nota" ? punto.nota || "" : (punto[k] ?? null)]),
+    );
+    const nuevo = { resultado: punto.resultado ?? null, nota: punto.nota || "", ...cambios };
+    const ahora = new Date().toISOString();
+    actualizarPunto(id, cambios);
+
+    let respuesta;
+    try {
+      respuesta = await marcarPunto(inspectionId, id, { ...cambios, marcado_en_dispositivo: ahora });
+    } catch (error) {
+      if (esRechazoDefinitivo(error)) {
+        if (esLaUltima()) actualizarPunto(id, anterior);
+        setStatus({ type: "error", text: `No se ha guardado la marca: ${motivoDelRechazo(error, "la marca")}` });
+        return;
+      }
+      try {
+        await guardarMarcaOffline({ inspectionId, puntoId: id, ...nuevo, marcadoEnDispositivo: ahora });
+        setStatus({
+          type: "info",
+          text: error?.response
+            ? "No se pudo contactar con el servidor: la marca se ha guardado en el móvil y se subirá después."
+            : "Sin conexión: la marca se ha guardado en el móvil y se subirá después.",
+        });
+      } catch (e) {
+        console.error("No se pudo guardar la marca en el móvil", e);
+        if (esLaUltima()) actualizarPunto(id, anterior);
+        setStatus({ type: "error", text: "No se ha podido guardar la marca. Inténtalo de nuevo." });
+      }
+      return;
+    }
+
+    // Guardada en el servidor: una marca anterior del mismo punto pendiente en el móvil sobra
+    quitarMarcaOffline(inspectionId, id, ahora).catch((e) =>
+      console.warn("No se pudo quitar la marca pendiente del móvil", e),
+    );
+    if (respuesta?.punto && esLaUltima()) {
+      const { resultado, nota, evidencias } = respuesta.punto;
+      actualizarPunto(id, { resultado, nota, evidencias });
+    }
+    if (respuesta?.aplicado === false) {
+      setStatus({ type: "info", text: "Este punto ya tenía una marca más reciente: se muestra la guardada." });
+    }
+  };
 
   // Detección heurística de móvil para elegir cámara nativa vs modal web.
   const isMobileDevice =
@@ -329,6 +487,10 @@ export default function InspectionForm({ inspectionId }) {
   const processFile = async (file, { desdeCamara = true } = {}) => {
     setCameraOpen(false);
     setStatus({ type: "loading", text: "Calculando huella SHA-256…" });
+    // Foto de un punto del checklist: su estancia manda
+    const punto = puntoFoto.current;
+    puntoFoto.current = null;
+    const room = punto ? punto.estancia : estanciaElegida;
 
     if (!room) {
       setStatus({
@@ -348,17 +510,32 @@ export default function InspectionForm({ inspectionId }) {
       const formData = formularioEvidencia({
         file,
         room,
-        description,
+        description: punto ? "" : description,
         hash,
         capturedAt,
+        punto: punto?.id,
       });
 
       try {
-        await api.post(`/inspecciones/${inspectionId}/evidencias/`, formData);
-        setStatus({
-          type: "success",
-          text: "Evidencia subida y sellada correctamente.",
-        });
+        const { data } = await api.post(`/inspecciones/${inspectionId}/evidencias/`, formData);
+        if (punto && data?.punto === punto.id) {
+          setChecklist((actual) =>
+            actual && {
+              ...actual,
+              estancias: actual.estancias.map((e) => ({
+                ...e,
+                puntos: e.puntos.map((p) =>
+                  p.id === punto.id ? { ...p, evidencias: [...(p.evidencias || []), data.id] } : p,
+                ),
+              })),
+            },
+          );
+        }
+        setStatus(
+          data?.aviso
+            ? { type: "info", text: `Foto subida, pero: ${data.aviso}` }
+            : { type: "success", text: "Evidencia subida y sellada correctamente." },
+        );
       } catch (error) {
         // Un rechazo del servidor (datos no válidos, inspección completada…) no se
         // arregla reintentando: se avisa y se deja el texto para corregirlo
@@ -373,18 +550,21 @@ export default function InspectionForm({ inspectionId }) {
         await saveEvidenceOffline({
           inspectionId,
           room,
-          description,
+          description: punto ? "" : description,
+          punto: punto?.id ?? null,
           hash,
           file,
           capturedAt,
           timestamp: new Date().toISOString(),
           synced: false,
         });
+        if (punto) setFotosPendientes((actual) => ({ ...actual, [punto.id]: (actual[punto.id] || 0) + 1 }));
         setStatus({
           type: "info",
           text: "Sin conexión o error de red: evidencia guardada en el móvil. Aún no aparecerá en el PDF hasta sincronizar.",
         });
       }
+      if (punto) return;
 
       setStep(1);
       setRoom("");
@@ -400,7 +580,14 @@ export default function InspectionForm({ inspectionId }) {
   };
 
   // En móvil abre la captura nativa; en desktop abre modal con preview en vivo.
-  const openCamera = () => {
+  const fotoDePunto = (punto, estancia) => abrirCaptura({ id: punto.id, estancia });
+
+  // Desde «Otras fotos»: sin punto
+  const openCamera = () => abrirCaptura(null);
+
+  // El destino de la foto viaja hasta processFile (la cámara se abre fuera de este render)
+  const abrirCaptura = (destino) => {
+    puntoFoto.current = destino;
     if (isMobileDevice && fileInputRef.current) {
       fileInputRef.current.click();
       return;
@@ -421,12 +608,34 @@ export default function InspectionForm({ inspectionId }) {
 
   // Solo permite finalizar si no quedan evidencias offline pendientes de sincronizar.
   const handleComplete = async () => {
-    const pending = await getPendingEvidencesByInspection(inspectionId);
-    if (pending.length > 0) {
+    if (cargaChecklist === "error") {
+      setStatus({ type: "error", text: "No se ha podido cargar el checklist: pulsa «Reintentar» antes de finalizar." });
+      return;
+    }
+    let pending;
+    let marcas;
+    try {
+      [pending, marcas] = await Promise.all([
+        getPendingEvidencesByInspection(inspectionId),
+        getMarcasPendientes(inspectionId),
+      ]);
+    } catch (e) {
+      console.error("No se pudo leer lo guardado en el móvil", e);
+      setStatus({ type: "error", text: "No se ha podido comprobar lo guardado en el móvil. Inténtalo de nuevo." });
+      return;
+    }
+    if (pending.length > 0 || marcas.length > 0) {
       setStatus({
         type: "error",
-        text: "Tienes evidencias pendientes de sincronizar en este móvil. No finalices la inspección hasta que se suban para que aparezcan en el PDF.",
+        text: "Tienes fotos o marcas del checklist pendientes de sincronizar en este móvil. No finalices la inspección hasta que se suban para que aparezcan en el PDF.",
       });
+      return;
+    }
+
+    // El servidor decide (409), pero así el operario lo sabe sin esperar a la red
+    const faltas = faltasLocales(checklist, fotosPendientes);
+    if (faltas.length > 0) {
+      setStatus({ type: "error", text: `Faltan puntos del checklist: ${textoFaltas(faltas)}.` });
       return;
     }
 
@@ -436,10 +645,15 @@ export default function InspectionForm({ inspectionId }) {
         estado: "COMPLETADA",
       });
       window.location.replace("/operario");
-    } catch {
+    } catch (error) {
+      const faltasServidor = error?.response?.status === 409 ? error.response.data?.faltas : null;
       setStatus({
         type: "error",
-        text: "Error al finalizar la inspección. Inténtalo de nuevo.",
+        text: Array.isArray(faltasServidor)
+          ? `Faltan puntos del checklist: ${textoFaltas(faltasServidor)}.`
+          : esRechazoDefinitivo(error)
+            ? `No se ha podido finalizar: ${motivoDelRechazo(error, "la petición")}`
+            : "Error al finalizar la inspección. Inténtalo de nuevo.",
       });
     }
   };
@@ -460,8 +674,49 @@ export default function InspectionForm({ inspectionId }) {
       {cameraOpen && (
         <CameraModal
           onCapture={processFile}
-          onClose={() => setCameraOpen(false)}
+          onClose={() => {
+            puntoFoto.current = null;
+            setCameraOpen(false);
+          }}
         />
+      )}
+
+      {cargaChecklist === "error" && (
+        <div role="alert" className="mb-6 px-4 py-3 rounded-lg bg-red-50 text-red-800 border border-red-200 text-sm">
+          <p>
+            No se ha podido cargar el checklist de esta inspección. Si tiene checklist, no podrás finalizarla hasta
+            cargarlo.
+          </p>
+          <button
+            type="button"
+            onClick={() => setReintentos((n) => n + 1)}
+            className="mt-2 min-h-11 px-4 rounded-lg border-2 border-red-700 font-semibold text-red-800 hover:bg-red-100"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+      {checklist?.tiene_checklist && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-6">
+          {cargaChecklist === "movil" && (
+            <p className="mb-3 text-xs text-slate-600">Sin conexión: es el checklist guardado en este móvil.</p>
+          )}
+          <ChecklistFlow
+            checklist={checklist}
+            fotosPendientes={fotosPendientes}
+            onMarcar={marcar}
+            onFoto={fotoDePunto}
+          />
+          {/* Los avisos van aquí, junto a lo que se acaba de marcar */}
+          <AvisoEstado status={status} />
+        </div>
+      )}
+
+      <section aria-labelledby={checklist?.tiene_checklist ? "otras-fotos-titulo" : undefined}>
+      {checklist?.tiene_checklist && (
+        <h3 id="otras-fotos-titulo" className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">
+          Otras fotos
+        </h3>
       )}
 
       {/* Tarjeta principal del flujo de inspección. */}
@@ -485,7 +740,7 @@ export default function InspectionForm({ inspectionId }) {
                   Estancia a inspeccionar
                 </label>
                 <select
-                  value={room}
+                  value={estanciaElegida}
                   onChange={(e) => setRoom(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
                 >
@@ -500,10 +755,10 @@ export default function InspectionForm({ inspectionId }) {
 
               <button
                 onClick={() => setStep(2)}
-                disabled={!room}
+                disabled={!estanciaElegida}
                 className="py-2.5 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
               >
-                Registrar daño en {room || "esta sala"}
+                Registrar daño en {estanciaElegida || "esta sala"}
               </button>
 
               <div className="border-t border-slate-100 pt-4">
@@ -523,7 +778,7 @@ export default function InspectionForm({ inspectionId }) {
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
                   Descripción del daño en{" "}
-                  <span className="text-slate-800">{room}</span>
+                  <span className="text-slate-800">{estanciaElegida}</span>
                 </label>
                 <textarea
                   value={description}
@@ -588,23 +843,11 @@ export default function InspectionForm({ inspectionId }) {
             </div>
           )}
 
-          {/* Mensajes de estado del flujo: éxito, error o información. */}
-          {status && (
-            <div
-              role={status.type === "error" ? "alert" : "status"}
-              className={`mt-5 px-4 py-3 rounded-lg text-sm font-medium ${
-                status.type === "success"
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                  : status.type === "error"
-                    ? "bg-red-50 text-red-700 border border-red-200"
-                    : "bg-blue-50 text-blue-700 border border-blue-200"
-              }`}
-            >
-              {status.text}
-            </div>
-          )}
+          {/* Mensajes de estado del flujo (con checklist, van junto a él) */}
+          {!checklist?.tiene_checklist && <AvisoEstado status={status} />}
         </div>
       </div>
+      </section>
     </>
   );
 }

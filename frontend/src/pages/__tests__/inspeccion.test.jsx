@@ -11,6 +11,8 @@ vi.mock("../../services/offline", () => ({
   getRejectedEvidences: vi.fn(),
   removeOfflineEvidence: vi.fn(),
   reintentarEvidencia: vi.fn(),
+  syncPendingMarcas: vi.fn(),
+  EVENTO_BD_BLOQUEADA: "checkit-bd-bloqueada",
 }));
 
 const offline = await import("../../services/offline");
@@ -34,6 +36,7 @@ beforeEach(() => {
   offline.syncPendingEvidences.mockResolvedValue(sinNada);
   offline.removeOfflineEvidence.mockResolvedValue(undefined);
   offline.reintentarEvidencia.mockResolvedValue(undefined);
+  offline.syncPendingMarcas.mockResolvedValue({ total: 0, syncedCount: 0, failedCount: 0, rejected: [] });
 });
 afterEach(() => {
   cleanup();
@@ -135,3 +138,40 @@ describe("InspectionPage: fotos rechazadas por el servidor", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
+
+describe("InspectionPage: marcas del checklist guardadas en el móvil", () => {
+  it("las sincroniza y avisa de las que el servidor rechazó", async () => {
+    offline.getRejectedEvidences.mockResolvedValue([]);
+    offline.syncPendingMarcas.mockResolvedValue({
+      total: 1, syncedCount: 0, failedCount: 0,
+      rejected: [{ inspectionId: 5, puntoId: 10, motivo: "La inspección ya está completada." }],
+    });
+    render(<InspectionPage />);
+    expect(await screen.findByText(/1 marca del checklist no se aplicó: La inspección ya está completada/)).toBeTruthy();
+  });
+});
+
+describe("InspectionPage: base del móvil bloqueada por otra pestaña", () => {
+  it("avisa de que hay que cerrar la otra pestaña", async () => {
+    offline.getRejectedEvidences.mockResolvedValue([]);
+    render(<InspectionPage />);
+    await waitFor(() => expect(offline.syncPendingEvidences).toHaveBeenCalled());
+    window.dispatchEvent(new CustomEvent("checkit-bd-bloqueada"));
+    expect(await screen.findByText(/abierto en otra pestaña/)).toBeTruthy();
+  });
+
+  it("varios rechazos de marcas se resumen con sus motivos", async () => {
+    offline.getRejectedEvidences.mockResolvedValue([]);
+    offline.syncPendingMarcas.mockResolvedValue({
+      total: 3, syncedCount: 0, failedCount: 0,
+      rejected: [
+        { inspectionId: 5, puntoId: 1, motivo: "Completada." },
+        { inspectionId: 5, puntoId: 2, motivo: "Completada." },
+        { inspectionId: 6, puntoId: 3, motivo: "El punto no existe." },
+      ],
+    });
+    render(<InspectionPage />);
+    expect(await screen.findByText(/3 marcas del checklist no se aplicaron: Completada\. \/ El punto no existe\./)).toBeTruthy();
+  });
+});
+

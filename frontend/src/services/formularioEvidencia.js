@@ -11,6 +11,7 @@ export const formularioEvidencia = ({
   description,
   hash,
   capturedAt,
+  punto,
 }) => {
   const formData = new FormData();
   formData.append("foto", file, file?.name || `evidencia_${Date.now()}.jpg`);
@@ -18,5 +19,7 @@ export const formularioEvidencia = ({
   if (description) formData.append("descripcion", description);
   if (hash) formData.append("hash_sha256", hash);
   if (capturedAt) formData.append("capturada_en", capturedAt);
+  // Punto del checklist que documenta (#19); la estancia la pone el servidor desde él
+  if (punto) formData.append("punto", String(punto));
   return formData;
 };

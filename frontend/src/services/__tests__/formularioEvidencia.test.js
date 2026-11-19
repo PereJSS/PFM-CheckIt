@@ -58,3 +58,12 @@ describe("formularioEvidencia", () => {
     expect(fd.get("foto").name).toMatch(/^evidencia_\d+\.jpg$/);
   });
 });
+
+describe("formularioEvidencia con punto del checklist", () => {
+  it("manda el punto si lo hay", () => {
+    const fd = formularioEvidencia({ file: foto, room: "Cocina", punto: 10 });
+    expect(fd.get("punto")).toBe("10");
+    expect(formularioEvidencia({ file: foto }).has("punto")).toBe(false);
+  });
+});
+

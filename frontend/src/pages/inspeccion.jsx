@@ -6,7 +6,10 @@ import {
   reintentarEvidencia,
   removeOfflineEvidence,
   syncPendingEvidences,
+  syncPendingMarcas,
+  EVENTO_BD_BLOQUEADA,
 } from "../services/offline";
+import { marcarPunto } from "../services/checklists";
 import { formularioEvidencia } from "../services/formularioEvidencia";
 import { horaDeArchivo } from "../utils/hora";
 import { clearAuthTokens } from "../services/authStorage";
@@ -34,6 +37,7 @@ const subirGuardada = (evidence) =>
       room: evidence.room,
       description: evidence.description,
       hash: evidence.hash,
+      punto: evidence.punto,
       capturedAt:
         "capturedAt" in evidence
           ? evidence.capturedAt
@@ -48,6 +52,8 @@ export default function InspectionPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [syncInfo, setSyncInfo] = useState(null);
+  // Sube tras cada sincronización con cambios: el formulario abierto recarga su checklist
+  const [recargas, setRecargas] = useState(0);
   // Fotos guardadas en el móvil que el servidor rechazó (no se reintentan solas)
   const [rechazadas, setRechazadas] = useState([]);
   // Fallos al leer o escribir las fotos guardadas en el móvil (IndexedDB)
@@ -83,13 +89,44 @@ export default function InspectionPage() {
       .finally(() => setLoading(false));
 
   // Si hay conexión, sube las fotos guardadas en el móvil
+  // Marcas del checklist hechas sin red; las que el servidor rechaza se avisan todas
+  const sincronizarMarcas = () =>
+    syncPendingMarcas((m) =>
+      marcarPunto(m.inspectionId, m.puntoId, {
+        resultado: m.resultado,
+        nota: m.nota || "",
+        marcado_en_dispositivo: m.marcadoEnDispositivo,
+      }),
+    )
+      .then((r) => {
+        if (!montada.current) return;
+        if (r.syncedCount > 0 || r.rejected.length > 0) setRecargas((n) => n + 1);
+        if (r.rejected.length === 0) return;
+        const n = r.rejected.length;
+        const motivos = [...new Set(r.rejected.map((x) => x.motivo))].join(" / ");
+        setAvisoLocal(
+          `${n === 1 ? "1 marca del checklist no se aplicó" : `${n} marcas del checklist no se aplicaron`}: ${motivos}`,
+        );
+      })
+      .catch((e) => {
+        console.error("Falló la sincronización de las marcas del checklist", e);
+        if (montada.current) {
+          setAvisoLocal("No se pudieron sincronizar las marcas del checklist guardadas en este móvil; se volverá a intentar.");
+        }
+      });
+
   const sincronizar = () => {
     if (!navigator.onLine) return Promise.resolve();
-    return syncPendingEvidences(subirGuardada)
+    return Promise.all([sincronizarMarcas(), sincronizarFotos()]);
+  };
+
+  const sincronizarFotos = () =>
+    syncPendingEvidences(subirGuardada)
       .then((result) => {
         if (!montada.current) return;
         if (result.rejected.length > 0) cargarRechazadas();
         if (result.syncedCount > 0) {
+          setRecargas((n) => n + 1);
           // Tras sincronizar, refresca para reflejar estado/contador actualizado.
           setSyncInfo(
             `Se sincronizaron ${result.syncedCount} evidencias pendientes.`,
@@ -105,7 +142,6 @@ export default function InspectionPage() {
           );
         }
       });
-  };
 
   const descartar = async (r) => {
     const confirmado = window.confirm(
@@ -146,11 +182,15 @@ export default function InspectionPage() {
     // Reintenta sincronización al recuperar conectividad del dispositivo.
     sincronizar();
     window.addEventListener("online", sincronizar);
+    const avisarBloqueo = () =>
+      setAvisoLocal("CheckIt está abierto en otra pestaña con una versión anterior: ciérrala para guardar datos en este móvil.");
+    window.addEventListener(EVENTO_BD_BLOQUEADA, avisarBloqueo);
 
     // Limpieza del listener al desmontar la página.
     return () => {
       montada.current = false;
       window.removeEventListener("online", sincronizar);
+      window.removeEventListener(EVENTO_BD_BLOQUEADA, avisarBloqueo);
     };
     // Solo al montar: las funciones leen estado mediante refs y setters estables
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -281,7 +321,7 @@ export default function InspectionPage() {
                     ← Volver
                   </button>
                 </div>
-                <InspectionForm inspectionId={seleccionada.id} />
+                <InspectionForm key={seleccionada.id} inspectionId={seleccionada.id} recarga={recargas} />
               </>
             ) : (
               /* ── Lista de inspecciones activas ── */

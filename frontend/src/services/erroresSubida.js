@@ -22,10 +22,11 @@ export const esRechazoDefinitivo = (error) => {
   return mensajeDeLaApi(error) !== null;
 };
 
-export const motivoDelRechazo = (error) => {
+// `objeto`: qué se rechazó, para el mensaje sin texto de la API («la foto», «la acción»…)
+export const motivoDelRechazo = (error, objeto = "la foto") => {
   const mensaje = mensajeDeLaApi(error);
   if (mensaje) return mensaje;
   const status = error?.response?.status;
   if (status === 413) return "La foto es demasiado grande para el servidor.";
-  return `El servidor rechazó la foto (código ${status}).`;
+  return `El servidor rechazó ${objeto} (código ${status}).`;
 };
