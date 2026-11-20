@@ -21,7 +21,7 @@ from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 import integraciones.schema  # noqa: F401  (registra la extensión y anotaciones OpenAPI)
 import core.schema  # noqa: F401
-from users.views import ThrottledTokenObtainPairView, ThrottledTokenRefreshView, MeView, OperariosView, OperarioDetailView, RegisterAdminView
+from users.views import ThrottledLogoutView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView, MeView, OperariosView, OperarioDetailView, RegisterAdminView
 
 urlpatterns = [
     
@@ -33,6 +33,7 @@ urlpatterns = [
     # Rutas de Autenticación (Login y Refresco de Tokens)
     path('api/v1/auth/login/', ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/v1/auth/refresh/', ThrottledTokenRefreshView.as_view(), name='token_refresh'),
+    path('api/v1/auth/logout/', ThrottledLogoutView.as_view(), name='token_logout'),
     path('api/v1/auth/me/', MeView.as_view(), name='me'),
 
     # Gestión de operarios (solo admins)

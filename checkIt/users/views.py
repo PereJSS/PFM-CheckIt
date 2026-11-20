@@ -3,28 +3,69 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.serializers import TokenBlacklistSerializer
+from rest_framework_simplejwt.views import TokenBlacklistView, TokenObtainPairView, TokenRefreshView
 from typing import cast
-from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
 from .throttles import LoginUsuarioThrottle
 from .models import User
-from .serializers import AdminRegisterSerializer, OperarioCreateSerializer
+from .serializers import AdminRegisterSerializer, LoginSerializer, OperarioCreateSerializer, RefrescoUsuarioActivoSerializer
 
 
+# Límite de peticiones de los endpoints de sesión: 429 con Retry-After (segundos)
+_429 = OpenApiResponse(
+    response=inline_serializer('DemasiadasPeticiones', {'detail': serializers.CharField()}),
+    description='Demasiadas peticiones. Reintentar pasados los segundos de Retry-After.',
+)
+_RETRY_AFTER = OpenApiParameter(
+    'Retry-After', OpenApiTypes.INT, OpenApiParameter.HEADER, response=[429],
+    description='Segundos que faltan para poder reintentar.',
+)
+_401_TOKEN = OpenApiResponse(description='Refresh token no válido, caducado, ya usado o de un usuario dado de baja')
+
+
+@extend_schema(
+    responses={200: LoginSerializer, 401: OpenApiResponse(description='Credenciales incorrectas'), 429: _429},
+    parameters=[_RETRY_AFTER],
+)
 class ThrottledTokenObtainPairView(TokenObtainPairView):
     """Login JWT con límite de peticiones (scope 'auth') contra fuerza bruta."""
     throttle_classes = [ScopedRateThrottle, LoginUsuarioThrottle]
     throttle_scope = 'auth_login'
 
 
+@extend_schema(
+    responses={200: RefrescoUsuarioActivoSerializer, 401: _401_TOKEN, 429: _429},
+    parameters=[_RETRY_AFTER],
+)
 class ThrottledTokenRefreshView(TokenRefreshView):
-    """Devuelve un access token nuevo a partir del refresh token. Con demasiadas
+    """Devuelve un access token y un refresh token nuevos; el refresh enviado queda
+    anulado (rotación): guarda siempre el que llega en la respuesta. Con demasiadas
     peticiones desde la misma IP responde 429 con la cabecera Retry-After."""
     # Sin límite se pueden probar refresh tokens filtrados sin freno. Cuota propia
     # para no bloquear a quien acaba de fallar el login.
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth_refresh'
+
+
+@extend_schema(
+    request=TokenBlacklistSerializer,
+    responses={
+        200: OpenApiResponse(description='Sesión cerrada: el refresh queda anulado'),
+        400: OpenApiResponse(description='Falta el refresh token'),
+        401: OpenApiResponse(description='Refresh token no válido, caducado o ya anulado'),
+        429: _429,
+    },
+    parameters=[_RETRY_AFTER],
+)
+class ThrottledLogoutView(TokenBlacklistView):
+    """Cierra la sesión en el servidor: anula el refresh token enviado. No exige el access
+    token (puede haber caducado); el refresh es la credencial. El access sigue valiendo
+    hasta que caduca."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_logout'
 
 
 class RegisterAdminView(APIView):

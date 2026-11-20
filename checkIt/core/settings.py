@@ -46,6 +46,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # Librerías externas
     'rest_framework',
+    # Lista negra de refresh tokens: rotación y logout en el servidor
+    'rest_framework_simplejwt.token_blacklist',
     'drf_spectacular',
     'corsheaders',
     # aplicaciones
@@ -223,6 +225,8 @@ REST_FRAMEWORK = {
         'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),
         # Por IP. El frontend refresca como mucho una vez cada 8 h por pestaña
         'auth_refresh': config('AUTH_REFRESH_THROTTLE_RATE', default='30/min'),
+        # Por IP. Cierre de sesión: anula el refresh en el servidor
+        'auth_logout': config('AUTH_LOGOUT_THROTTLE_RATE', default='30/min'),
     },
 }
 
@@ -251,6 +255,12 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
     # Un usuario dado de baja no refresca su token (la versión 5.3 no lo comprueba)
     'TOKEN_REFRESH_SERIALIZER': 'users.serializers.RefrescoUsuarioActivoSerializer',
+    # Guarda en la lista de refresh emitidos su huella, no el JWT
+    'TOKEN_OBTAIN_SERIALIZER': 'users.serializers.LoginSerializer',
+    # Cada refresco entrega un refresh nuevo y anula el anterior: un refresh robado deja de
+    # servir en cuanto el dueño refresca. La anulación la hace el serializer (un solo ganador)
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 
 # URL pública del backend: base de los enlaces absolutos que salen en los webhooks
@@ -323,6 +333,12 @@ CELERY_BEAT_SCHEDULE = {
     # Webhooks salientes: purga diaria de entregas y eventos cerrados (WEBHOOK_ENTREGAS_RETENCION_DIAS)
     'purgar-entregas-webhook': {
         'task': 'integraciones.tasks.purgar_entregas_webhook',
+        'schedule': 24 * 3600.0,
+        'options': {'expires': 3600},
+    },
+    # Refresh tokens caducados (registrados y anulados): ya no sirven y la tabla crecería sin fin
+    'purgar-tokens-caducados': {
+        'task': 'users.tasks.purgar_tokens_caducados',
         'schedule': 24 * 3600.0,
         'options': {'expires': 3600},
     },

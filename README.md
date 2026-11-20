@@ -186,6 +186,7 @@ El proyecto usa python-decouple. Variables disponibles:
 | `AUTH_LOGIN_THROTTLE_RATE` | No     | Límite de login por IP (por defecto `10/min`) |
 | `AUTH_USUARIO_THROTTLE_RATE` | No   | Límite de login por username, independiente de la IP (por defecto `5/min`) |
 | `AUTH_REFRESH_THROTTLE_RATE` | No   | Límite de refresco del token por IP (por defecto `30/min`) |
+| `AUTH_LOGOUT_THROTTLE_RATE` | No    | Límite de cierre de sesión por IP (por defecto `30/min`) |
 | `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
 | `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`). **En Render es `2`** (Cloudflare + balanceador de Render; verificado el 15 oct de 2026). Con un valor bajo, la identidad del throttling es la IP del proxy y los clientes comparten contador; con uno alto, se elude falsificando `X-Forwarded-For` |
 | `WEBHOOK_SALIENTE_TIMEOUT_CONEXION` | No | Timeout de conexión de los webhooks salientes en segundos (por defecto `3`) |
@@ -273,7 +274,8 @@ Base URL: /api/v1
 | ------ | --------------- | ---------------------------- | ------- |
 | POST   | /auth/register/ | Registro de administrador    | Pública |
 | POST   | /auth/login/    | Obtiene access y refresh JWT | Pública |
-| POST   | /auth/refresh/  | Renueva access token         | Pública |
+| POST   | /auth/refresh/  | Renueva access **y refresh**: el refresh enviado queda anulado (rotación); guarda siempre el nuevo | Pública |
+| POST   | /auth/logout/   | Anula el refresh enviado (`{"refresh": …}`); el access vale hasta que caduca | Pública |
 | GET    | /auth/me/       | Usuario autenticado actual   | JWT     |
 
 ### Operarios
@@ -452,7 +454,7 @@ La documentación es pública porque la usan los integradores de PMS:
 
 El esquema se valida con `python manage.py spectacular --validate --fail-on-warn` (también en el CI).
 
-Límites (respuesta `429` con `Retry-After`): auditoría pública, login (por IP **y** por username), registro y webhooks de entrada; ver las variables `*_THROTTLE_RATE`. La IP del cliente se toma de `X-Forwarded-For` según `NUM_PROXIES`. Los contadores viven en la caché: en producción define `REDIS_URL` para que sean compartidos entre procesos.
+Límites (respuesta `429` con `Retry-After`): auditoría pública, login (por IP **y** por username), refresco, cierre de sesión, registro y webhooks de entrada; ver las variables `*_THROTTLE_RATE`. La IP del cliente se toma de `X-Forwarded-For` según `NUM_PROXIES`. Los contadores viven en la caché: en producción define `REDIS_URL` para que sean compartidos entre procesos.
 
 ---
 
