@@ -6,10 +6,14 @@ import {
   clearAuthTokens,
   getAccessToken,
   getRefreshToken,
-  setAccessToken,
+  setAuthTokens,
 } from "./authStorage";
 
 export const apiBaseUrl = import.meta.env.VITE_API_URL || "/api/v1";
+
+// Tope del refresco: sin él, una respuesta que no llega (Render arrancando) deja colgadas
+// todas las peticiones que esperan el token. Al vencer cuenta como fallo de red: no cierra sesión
+export const REFRESCO_TIMEOUT_MS = 15000;
 
 const api = axios.create({
   baseURL: apiBaseUrl,
@@ -48,12 +52,13 @@ const sigueLaMismaSesion = (refreshToken) => getRefreshToken() === refreshToken;
 const refrescarAccessToken = (refreshToken) => {
   if (refrescoEnCurso?.refreshToken !== refreshToken) {
     const promesa = axios
-      .post(`${apiBaseUrl}/auth/refresh/`, { refresh: refreshToken })
+      .post(`${apiBaseUrl}/auth/refresh/`, { refresh: refreshToken }, { timeout: REFRESCO_TIMEOUT_MS })
       .then(({ data }) => {
         if (!sigueLaMismaSesion(refreshToken)) {
           throw new Error("La sesión cambió durante el refresco");
         }
-        setAccessToken(data.access);
+        // Rotación: el servidor anula el refresh usado y entrega otro en la respuesta
+        setAuthTokens({ accessToken: data.access, refreshToken: data.refresh });
         return data.access;
       })
       .finally(() => {
@@ -67,6 +72,30 @@ const refrescarAccessToken = (refreshToken) => {
 const cerrarSesion = () => {
   clearAuthTokens();
   window.location.href = "/login";
+};
+
+// Botón «Cerrar sesión»: anula el refresh en el servidor y, sin esperar respuesta, borra
+// la sesión local. keepalive deja terminar la petición aunque la página navegue a /login;
+// si falla (sin red, 429), el refresh caduca solo y ya no está en esta pestaña. Si había un
+// refresco en vuelo, el refresh que este entregue no se guarda (cambió la sesión) y caduca solo.
+const avisarLogoutFallido = (motivo) =>
+  console.warn("No se pudo anular la sesión en el servidor; caducará sola:", motivo);
+
+export const salir = () => {
+  const refresh = getRefreshToken();
+  if (refresh) {
+    fetch(`${apiBaseUrl}/auth/logout/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh }),
+      keepalive: true,
+    })
+      .then((respuesta) => {
+        if (!respuesta.ok) avisarLogoutFallido(respuesta.status);
+      })
+      .catch(avisarLogoutFallido);
+  }
+  cerrarSesion();
 };
 
 // Interceptor de respuesta: si el access token expiró (401), intenta renovarlo

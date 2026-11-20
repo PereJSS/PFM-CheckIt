@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import InspectionForm from "../components/inspectionForm";
-import api from "../services/api";
+import api, { salir } from "../services/api";
 import {
   getRejectedEvidences,
   reintentarEvidencia,
@@ -12,7 +12,6 @@ import {
 import { marcarPunto } from "../services/checklists";
 import { formularioEvidencia } from "../services/formularioEvidencia";
 import { horaDeArchivo } from "../utils/hora";
-import { clearAuthTokens } from "../services/authStorage";
 
 // Diccionarios para mostrar estado con etiqueta legible y estilo visual consistente.
 const ESTADO_BADGE = {
@@ -212,11 +211,8 @@ export default function InspectionPage() {
             Operario
           </span>
           <button
-            onClick={() => {
-              // Logout local simple para SPA: limpia tokens y redirige.
-              clearAuthTokens();
-              window.location.href = "/login";
-            }}
+            // Anula el refresh en el servidor, limpia tokens y va a /login
+            onClick={salir}
             className="text-sm text-slate-500 hover:text-slate-800 transition font-medium"
           >
             Cerrar sesión

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../services/api", () => ({
   default: { get: vi.fn().mockResolvedValue({ data: [] }), post: vi.fn() },
+  salir: vi.fn(),
 }));
 vi.mock("../../services/offline", () => ({
   syncPendingEvidences: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("../../services/offline", () => ({
 }));
 
 const offline = await import("../../services/offline");
+const { salir } = await import("../../services/api");
 const { default: InspectionPage } = await import("../inspeccion");
 
 const rechazada = {
@@ -175,3 +177,10 @@ describe("InspectionPage: base del móvil bloqueada por otra pestaña", () => {
   });
 });
 
+describe("InspectionPage: cerrar sesión", () => {
+  it("el botón anula la sesión en el servidor (salir)", async () => {
+    render(<InspectionPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Cerrar sesión/ }));
+    expect(salir).toHaveBeenCalledTimes(1);
+  });
+});

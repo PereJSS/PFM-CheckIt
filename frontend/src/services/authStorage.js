@@ -18,13 +18,6 @@ export const setAuthTokens = ({ accessToken, refreshToken }) => {
   }
 };
 
-// Actualiza solo el access token (p. ej., tras refresh silencioso de sesión).
-export const setAccessToken = (accessToken) => {
-  if (accessToken) {
-    sessionStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  }
-};
-
 // Cierra sesión local eliminando tokens de almacenamiento de sesión y legado.
 export const clearAuthTokens = () => {
   sessionStorage.removeItem(ACCESS_TOKEN_KEY);

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import api from "../services/api";
+import api, { salir } from "../services/api";
 import IntegracionesPanel from "../components/integraciones/IntegracionesPanel";
 import PlantillasPanel from "../components/checklists/PlantillasPanel";
 import { aplicarChecklist, listarPlantillas } from "../services/checklists";
 import { motivoDelRechazo } from "../services/erroresSubida";
-import { clearAuthTokens } from "../services/authStorage";
 
 // Catálogo de estilos/etiquetas para pintar el estado de cada inspección en tabla.
 const ESTADO = {
@@ -294,11 +293,8 @@ export default function AdminPage() {
     }
   };
 
-  // Cierre de sesión local: limpia tokens y redirige a login.
-  const handleLogout = () => {
-    clearAuthTokens();
-    window.location.href = "/login";
-  };
+  // Cierre de sesión: anula el refresh en el servidor, limpia tokens y va a /login.
+  const handleLogout = salir;
 
   // Crea una inspección asignando propiedad + operario seleccionados.
   const handleSubmit = async (e) => {

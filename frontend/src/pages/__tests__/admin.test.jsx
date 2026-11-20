@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../services/api", () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+  salir: vi.fn(),
 }));
 // El panel de integraciones hace sus propias llamadas: no interesa aquí
 vi.mock("../../components/integraciones/IntegracionesPanel", () => ({ default: () => null }));
 
-const { default: api } = await import("../../services/api");
+const { default: api, salir } = await import("../../services/api");
 const { default: AdminPage } = await import("../admin");
 
 const VIVIENDA = {
@@ -105,3 +106,10 @@ describe("AdminPage: plantillas que no cargan", () => {
   });
 });
 
+describe("AdminPage: cerrar sesión", () => {
+  it("el botón anula la sesión en el servidor (salir)", async () => {
+    render(<AdminPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /Cerrar sesión/ }));
+    expect(salir).toHaveBeenCalledTimes(1);
+  });
+});
