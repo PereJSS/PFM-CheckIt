@@ -435,7 +435,7 @@ export default function AdminPage() {
           <span className="text-xl font-bold tracking-tight text-slate-900">
             CheckIt
           </span>
-          <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+          <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">
             Admin
           </span>
         </div>
@@ -601,7 +601,7 @@ export default function AdminPage() {
                         key={insp.id}
                         className="hover:bg-slate-50 transition"
                       >
-                        <td className="px-5 py-3.5 font-mono text-xs text-slate-400">
+                        <td className="px-5 py-3.5 font-mono text-xs text-slate-500">
                           #{insp.id}
                         </td>
                         <td className="px-5 py-3.5 font-medium text-slate-800">
@@ -654,7 +654,7 @@ export default function AdminPage() {
                             </div>
                           ) : (
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-slate-400 text-xs italic">
+                              <span className="text-slate-500 text-xs italic">
                                 Pendiente de operario
                               </span>
                               {!insp.checklist_resumen && plantillas.length > 0 && (
@@ -677,7 +677,7 @@ export default function AdminPage() {
                     <tr>
                       <td
                         colSpan={6}
-                        className="px-5 py-10 text-center text-slate-400 text-sm"
+                        className="px-5 py-10 text-center text-slate-500 text-sm"
                       >
                         No hay inspecciones registradas.
                       </td>
@@ -796,7 +796,7 @@ export default function AdminPage() {
                     />
                     <p
                       id="prop-external-id-ayuda"
-                      className="mt-1 text-xs text-slate-400"
+                      className="mt-1 text-xs text-slate-500"
                     >
                       Identificador de la propiedad en tu PMS. Los webhooks lo
                       envían como data.property_id (no distingue mayúsculas).
@@ -877,7 +877,7 @@ export default function AdminPage() {
 
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
               {propiedades.length === 0 ? (
-                <p className="px-5 py-10 text-center text-slate-400 text-sm">
+                <p className="px-5 py-10 text-center text-slate-500 text-sm">
                   Aún no tienes propiedades. Crea la primera.
                 </p>
               ) : (
@@ -906,7 +906,7 @@ export default function AdminPage() {
                       <tr key={p.id} className="hover:bg-slate-50 transition">
                         <td className="px-5 py-3.5 font-medium text-slate-800">
                           {p.nombre}
-                          <span className="block text-xs font-normal text-slate-400">
+                          <span className="block text-xs font-normal text-slate-500">
                             {p.plantilla_efectiva
                               ? `Checklist: ${p.plantilla_efectiva.nombre}${p.plantilla_efectiva.origen === "defecto" ? " (por defecto)" : ""}`
                               : "Sin checklist"}
@@ -915,7 +915,7 @@ export default function AdminPage() {
                         <td className="px-5 py-3.5 text-slate-500">
                           {p.direccion}
                         </td>
-                        <td className="px-5 py-3.5 text-slate-400 italic">
+                        <td className="px-5 py-3.5 text-slate-500 italic">
                           {p.descripcion || "—"}
                         </td>
                         <td className="px-5 py-3.5 font-mono text-xs text-slate-500">
@@ -1070,7 +1070,7 @@ export default function AdminPage() {
 
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
               {operarios.length === 0 ? (
-                <p className="px-5 py-10 text-center text-slate-400 text-sm">
+                <p className="px-5 py-10 text-center text-slate-500 text-sm">
                   Aún no hay operarios. Crea el primero.
                 </p>
               ) : (
@@ -1100,7 +1100,7 @@ export default function AdminPage() {
                         <td className="px-5 py-3.5 text-slate-500 font-mono text-xs">
                           {o.username}
                         </td>
-                        <td className="px-5 py-3.5 text-slate-400">
+                        <td className="px-5 py-3.5 text-slate-500">
                           {o.email || "—"}
                         </td>
                         <td className="px-5 py-3.5">

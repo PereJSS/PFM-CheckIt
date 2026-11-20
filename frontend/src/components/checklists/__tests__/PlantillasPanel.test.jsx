@@ -99,3 +99,30 @@ describe("PlantillasPanel: avisos", () => {
   });
 });
 
+describe("PlantillasPanel: la primera plantilla", () => {
+  it("no se marca por defecto sin pedirlo", async () => {
+    ck.listarPlantillas.mockResolvedValue([]);
+    render(<PlantillasPanel />);
+    await userEvent.click(await screen.findByRole("button", { name: "Nueva plantilla" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Vivienda/ }));
+    expect(screen.getByLabelText("Plantilla por defecto del cliente").checked).toBe(false);
+    ck.crearPlantilla.mockResolvedValue({ id: 9, nombre: "Pisos", por_defecto: false });
+    await userEvent.type(screen.getByLabelText("Nombre de la plantilla"), "Pisos");
+    await userEvent.click(screen.getByRole("button", { name: "Guardar plantilla" }));
+    await waitFor(() => expect(ck.crearPlantilla).toHaveBeenCalledTimes(1));
+    expect(ck.crearPlantilla).toHaveBeenCalledWith(expect.objectContaining({ por_defecto: false }));
+  });
+
+  it("se envía por defecto si el admin lo marca", async () => {
+    ck.listarPlantillas.mockResolvedValue([]);
+    ck.crearPlantilla.mockResolvedValue({ id: 9, nombre: "Pisos", por_defecto: true });
+    render(<PlantillasPanel />);
+    await userEvent.click(await screen.findByRole("button", { name: "Nueva plantilla" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Vivienda/ }));
+    await userEvent.type(screen.getByLabelText("Nombre de la plantilla"), "Pisos");
+    await userEvent.click(screen.getByLabelText("Plantilla por defecto del cliente"));
+    await userEvent.click(screen.getByRole("button", { name: "Guardar plantilla" }));
+    await waitFor(() => expect(ck.crearPlantilla).toHaveBeenCalledWith(expect.objectContaining({ por_defecto: true })));
+  });
+});
+

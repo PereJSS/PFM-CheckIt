@@ -20,71 +20,73 @@ function Punto({ punto, estancia, fotosPendientes, onMarcar, onFoto, deshabilita
   const faltaFoto = fotos === 0 && punto.resultado === "DANO";
 
   return (
-    <li role="group" aria-labelledby={tituloId} aria-describedby={fotosId}
-      className="rounded-lg border border-slate-200 p-4 flex flex-col gap-3">
-      <div className="flex items-start justify-between gap-2">
-        <p id={tituloId} className="text-sm font-semibold text-slate-800">
-          {punto.texto}
-        </p>
-        {punto.requiere_foto && (
-          <span className="shrink-0 text-xs font-medium text-amber-800 bg-amber-50 rounded px-2 py-0.5">
-            Foto obligatoria
-          </span>
-        )}
-      </div>
+    <li>
+      <div role="group" aria-labelledby={tituloId} aria-describedby={fotosId}
+        className="rounded-lg border border-slate-200 p-4 flex flex-col gap-3">
+        <div className="flex items-start justify-between gap-2">
+          <p id={tituloId} className="text-sm font-semibold text-slate-800">
+            {punto.texto}
+          </p>
+          {punto.requiere_foto && (
+            <span className="shrink-0 text-xs font-medium text-amber-800 bg-amber-50 rounded px-2 py-0.5">
+              Foto obligatoria
+            </span>
+          )}
+        </div>
 
-      <div className="grid grid-cols-3 gap-2">
-        {RESULTADOS.map((r) => {
-          const activo = punto.resultado === r.valor;
-          return (
-            <button
-              key={r.valor}
-              type="button"
-              aria-pressed={activo}
-              disabled={deshabilitado}
-              onClick={() => onMarcar(punto, { resultado: r.valor })}
-              className={`min-h-12 px-2 py-3 rounded-lg border-2 text-sm font-semibold transition disabled:opacity-40 ${FOCO} ${
-                activo ? MARCADO[r.valor] : "bg-white text-slate-800 border-slate-500 hover:bg-slate-50"
-              }`}
-            >
-              {activo && <span aria-hidden="true">✓ </span>}
-              {r.etiqueta}{" "}
-              <span className="sr-only">— {punto.texto}</span>
-            </button>
-          );
-        })}
-      </div>
+        <div className="grid grid-cols-3 gap-2">
+          {RESULTADOS.map((r) => {
+            const activo = punto.resultado === r.valor;
+            return (
+              <button
+                key={r.valor}
+                type="button"
+                aria-pressed={activo}
+                disabled={deshabilitado}
+                onClick={() => onMarcar(punto, { resultado: r.valor })}
+                className={`min-h-12 px-2 py-3 rounded-lg border-2 text-sm font-semibold disabled:opacity-40 ${FOCO} ${
+                  activo ? MARCADO[r.valor] : "bg-white text-slate-800 border-slate-500 hover:bg-slate-50"
+                }`}
+              >
+                {activo && <span aria-hidden="true">✓ </span>}
+                {r.etiqueta}{" "}
+                <span className="sr-only">— {punto.texto}</span>
+              </button>
+            );
+          })}
+        </div>
 
-      <div>
-        <label htmlFor={`nota-${punto.id}`} className="block text-xs font-medium text-slate-600 mb-1">
-          Nota (opcional)
-        </label>
-        <textarea
-          id={`nota-${punto.id}`}
-          value={nota}
-          maxLength={DESCRIPCION_MAX}
-          disabled={deshabilitado}
-          onChange={(e) => setNota(e.target.value)}
-          onBlur={() => {
-            if (nota !== (punto.nota || "")) onMarcar(punto, { nota });
-          }}
-          className="w-full px-3 py-2 rounded-lg border border-slate-400 text-sm min-h-16"
-        />
-      </div>
+        <div>
+          <label htmlFor={`nota-${punto.id}`} className="block text-xs font-medium text-slate-600 mb-1">
+            Nota (opcional)
+          </label>
+          <textarea
+            id={`nota-${punto.id}`}
+            value={nota}
+            maxLength={DESCRIPCION_MAX}
+            disabled={deshabilitado}
+            onChange={(e) => setNota(e.target.value)}
+            onBlur={() => {
+              if (nota !== (punto.nota || "")) onMarcar(punto, { nota });
+            }}
+            className="w-full px-3 py-2 rounded-lg border border-slate-500 text-sm min-h-16"
+          />
+        </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <p id={fotosId} aria-live="polite"
-          className={`text-xs ${faltaFoto ? "text-red-700 font-semibold" : "text-slate-600"}`}>
-          {faltaFoto ? "Falta una foto del daño." : fotos === 1 ? "1 foto" : `${fotos} fotos`}
-        </p>
-        <button
-          type="button"
-          disabled={deshabilitado}
-          onClick={() => onFoto(punto, estancia.nombre)}
-          className={`min-h-11 px-4 rounded-lg border-2 border-blue-700 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-40 ${FOCO}`}
-        >
-          Añadir foto{" "}<span className="sr-only">a {punto.texto}</span>
-        </button>
+        <div className="flex items-center justify-between gap-2">
+          <p id={fotosId} aria-live="polite"
+            className={`text-xs ${faltaFoto ? "text-red-700 font-semibold" : "text-slate-600"}`}>
+            {faltaFoto ? "Falta una foto del daño." : fotos === 1 ? "1 foto" : `${fotos} fotos`}
+          </p>
+          <button
+            type="button"
+            disabled={deshabilitado}
+            onClick={() => onFoto(punto, estancia.nombre)}
+            className={`min-h-11 px-4 rounded-lg border-2 border-blue-700 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-40 ${FOCO}`}
+          >
+            Añadir foto{" "}<span className="sr-only">a {punto.texto}</span>
+          </button>
+        </div>
       </div>
     </li>
   );

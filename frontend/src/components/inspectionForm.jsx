@@ -243,8 +243,10 @@ function CameraModal({ onCapture, onClose }) {
         <div className="flex items-center justify-between px-4 py-3 bg-slate-900">
           <span className="text-sm font-semibold text-white">Cámara</span>
           <button
+            type="button"
             onClick={onClose}
-            className="text-slate-400 hover:text-white transition text-lg leading-none"
+            aria-label="Cerrar cámara"
+            className="min-w-11 min-h-11 -my-2 -mr-2 rounded-lg text-slate-300 hover:text-white transition text-lg leading-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           >
             ✕
           </button>
@@ -736,10 +738,11 @@ export default function InspectionForm({ inspectionId, recarga = 0 }) {
           {step === 1 && (
             <div className="flex flex-col gap-5">
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                <label htmlFor="estancia-libre" className="block text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">
                   Estancia a inspeccionar
                 </label>
                 <select
+                  id="estancia-libre"
                   value={estanciaElegida}
                   onChange={(e) => setRoom(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
@@ -790,7 +793,7 @@ export default function InspectionForm({ inspectionId, recarga = 0 }) {
                 />
                 <p
                   id="contador-descripcion"
-                  className="mt-1 text-xs text-slate-400 text-right"
+                  className="mt-1 text-xs text-slate-600 text-right"
                 >
                   {description.length}/{DESCRIPCION_MAX} caracteres
                 </p>
@@ -802,7 +805,7 @@ export default function InspectionForm({ inspectionId, recarga = 0 }) {
                 className="flex flex-col items-center gap-3 p-6 rounded-xl border-2 border-dashed border-slate-300 hover:border-blue-400 hover:bg-blue-50 transition w-full"
               >
                 <svg
-                  className="w-8 h-8 text-slate-400"
+                  className="w-8 h-8 text-slate-600"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
@@ -824,19 +827,19 @@ export default function InspectionForm({ inspectionId, recarga = 0 }) {
                   {isMobileDevice ? "Abrir cámara del móvil" : "Abrir cámara"}
                 </span>
                 {isMobileDevice && (
-                  <span className="text-xs text-slate-500 text-center">
+                  <span className="text-xs text-slate-600 text-center">
                     Se abrirá la app de cámara del dispositivo para que la foto
                     se tome con vista previa nativa.
                   </span>
                 )}
-                <span className="text-xs text-slate-400">
+                <span className="text-xs text-slate-600">
                   La foto se sellará con SHA-256 localmente
                 </span>
               </button>
 
               <button
                 onClick={() => setStep(1)}
-                className="text-sm text-slate-400 hover:text-slate-600 transition"
+                className="text-sm text-slate-600 hover:text-slate-900 transition"
               >
                 ← Volver
               </button>

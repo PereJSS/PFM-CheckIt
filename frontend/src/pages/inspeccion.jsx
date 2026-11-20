@@ -208,7 +208,7 @@ export default function InspectionPage() {
           CheckIt
         </span>
         <div className="flex items-center gap-3">
-          <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+          <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">
             Operario
           </span>
           <button
@@ -353,7 +353,7 @@ export default function InspectionPage() {
                               <p className="font-medium text-slate-800 truncate group-hover:text-blue-600 transition">
                                 {insp.propiedad_nombre}
                               </p>
-                              <p className="text-xs text-slate-400 mt-0.5">
+                              <p className="text-xs text-slate-600 mt-0.5">
                                 #{insp.id} ·{" "}
                                 {new Date(
                                   insp.fecha_creacion,

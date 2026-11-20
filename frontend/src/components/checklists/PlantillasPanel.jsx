@@ -144,7 +144,8 @@ export default function PlantillasPanel({ onCambio }) {
                 setEditando({
                   nombre: m.id === "vacia" ? "" : m.nombre,
                   descripcion: "",
-                  por_defecto: plantillas.length === 0,
+                  // Nunca por defecto sin pedirlo: activaría el checklist en todas las propiedades
+                  por_defecto: false,
                   estructura: copia(m.estructura),
                 });
               }}
