@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../services/api";
-import { setAuthTokens } from "../services/authStorage";
+import { guardarRol, setAuthTokens } from "../services/authStorage";
 
 // Acepta roles legacy para evitar fallos de redirección por variantes de nombre.
 const isAdminRole = (role) => {
@@ -41,6 +41,8 @@ export default function Login() {
       // 2) Carga el usuario autenticado para enrutar según rol.
       const meResponse = await api.get("/auth/me/");
       const role = meResponse.data.role;
+      // El de este usuario, no el de una sesión anterior en la misma pestaña (#15)
+      guardarRol(String(role || "").trim().toUpperCase());
       window.location.href = isAdminRole(role) ? "/" : "/operario";
     } catch (err) {
       // 429: el interceptor de api.js ya trae un mensaje claro ("Demasiados intentos…").
@@ -82,12 +84,14 @@ export default function Login() {
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div>
               {/* Campo de usuario */}
-              <label className="block text-xs font-medium text-slate-600 mb-1.5">
+              <label htmlFor="login-username" className="block text-xs font-medium text-slate-600 mb-1.5">
                 Usuario
               </label>
               <input
+                id="login-username"
                 type="text"
                 name="username"
+                autoComplete="username"
                 placeholder="nombre de usuario"
                 onChange={handleChange}
                 required
@@ -97,12 +101,14 @@ export default function Login() {
 
             <div>
               {/* Campo de contraseña */}
-              <label className="block text-xs font-medium text-slate-600 mb-1.5">
+              <label htmlFor="login-password" className="block text-xs font-medium text-slate-600 mb-1.5">
                 Contraseña
               </label>
               <input
+                id="login-password"
                 type="password"
                 name="password"
+                autoComplete="current-password"
                 placeholder="••••••••"
                 onChange={handleChange}
                 required

@@ -181,6 +181,12 @@ export default function InspectionPage() {
     // Reintenta sincronización al recuperar conectividad del dispositivo.
     sincronizar();
     window.addEventListener("online", sincronizar);
+    // PWA (#15): al volver a la app (iOS no tiene Background Sync, y en segundo plano el
+    // móvil puede haber recuperado la red sin que llegue «online»)
+    const alVolver = () => {
+      if (document.visibilityState === "visible") sincronizar();
+    };
+    document.addEventListener("visibilitychange", alVolver);
     const avisarBloqueo = () =>
       setAvisoLocal("CheckIt está abierto en otra pestaña con una versión anterior: ciérrala para guardar datos en este móvil.");
     window.addEventListener(EVENTO_BD_BLOQUEADA, avisarBloqueo);
@@ -189,6 +195,7 @@ export default function InspectionPage() {
     return () => {
       montada.current = false;
       window.removeEventListener("online", sincronizar);
+      document.removeEventListener("visibilitychange", alVolver);
       window.removeEventListener(EVENTO_BD_BLOQUEADA, avisarBloqueo);
     };
     // Solo al montar: las funciones leen estado mediante refs y setters estables

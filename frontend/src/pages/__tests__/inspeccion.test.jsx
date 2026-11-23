@@ -184,3 +184,28 @@ describe("InspectionPage: cerrar sesión", () => {
     expect(salir).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("InspectionPage: sincronizar al volver a la app (#15)", () => {
+  const cambiarVisibilidad = (estado) => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue(estado);
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  it("al volver a primer plano sube lo pendiente; al irse no", async () => {
+    offline.getRejectedEvidences.mockResolvedValue([]);
+    const { unmount } = render(<InspectionPage />);
+    await waitFor(() => expect(offline.syncPendingEvidences).toHaveBeenCalledTimes(1));
+    expect(offline.syncPendingMarcas).toHaveBeenCalledTimes(1);
+
+    cambiarVisibilidad("hidden");
+    expect(offline.syncPendingEvidences).toHaveBeenCalledTimes(1);
+
+    cambiarVisibilidad("visible");
+    await waitFor(() => expect(offline.syncPendingEvidences).toHaveBeenCalledTimes(2));
+    expect(offline.syncPendingMarcas).toHaveBeenCalledTimes(2);
+
+    unmount();
+    cambiarVisibilidad("visible");
+    expect(offline.syncPendingEvidences).toHaveBeenCalledTimes(2);
+  });
+});

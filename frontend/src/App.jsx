@@ -5,8 +5,9 @@ import Register from "./pages/register";
 import AdminPage from "./pages/admin";
 import InspectionPage from "./pages/inspeccion";
 import Verificar from "./pages/verificar";
+import AvisoActualizacion from "./components/AvisoActualizacion";
 import api from "./services/api";
-import { clearAuthTokens, getAccessToken } from "./services/authStorage";
+import { clearAuthTokens, getAccessToken, getRolGuardado, guardarRol } from "./services/authStorage";
 
 // Normaliza el rol para comparar sin depender de mayúsculas/espacios del backend.
 function normalizeRole(role) {
@@ -30,21 +31,53 @@ function ProtectedRoute({ children, allowedRoles }) {
     [allowedRoles],
   );
 
+  // Sin red y sin rol recordado: se avisa en vez de cerrar la sesión
+  const [sinConexion, setSinConexion] = useState(false);
+  const [intento, setIntento] = useState(0);
+
   useEffect(() => {
     // Sin token isLoading ya parte en false (ver useState), no hay nada que validar.
     if (!token) return;
 
     // Valida sesión vigente y obtiene rol real del usuario autenticado.
+    let vigente = true;
     api
       .get("/auth/me/")
-      .then((res) => setRole(normalizeRole(res.data?.role)))
-      .catch(() => {
-        // Si el token es inválido/expirado, limpiamos sesión local.
-        clearAuthTokens();
-        setRole(null);
+      .then((res) => {
+        if (!vigente) return;
+        const rol = normalizeRole(res.data?.role);
+        guardarRol(rol);
+        setRole(rol);
+        setSinConexion(false);
       })
-      .finally(() => setIsLoading(false));
-  }, [token]);
+      .catch((error) => {
+        if (!vigente) return;
+        const estado = error.response?.status;
+        // Solo un rechazo del servidor cierra la sesión (token inválido o usuario de baja)
+        if (estado === 401 || estado === 403) {
+          clearAuthTokens();
+          setRole(null);
+          return;
+        }
+        // Sin red, 5xx o 429 (#15): la sesión sigue. El rol recordado solo elige la
+        // pantalla; cada petición a la API la autoriza el servidor.
+        const recordado = getRolGuardado();
+        if (recordado) setRole(normalizeRole(recordado));
+        else setSinConexion(true);
+      })
+      .finally(() => {
+        if (vigente) setIsLoading(false);
+      });
+    return () => {
+      vigente = false;
+    };
+  }, [token, intento]);
+
+  const reintentar = () => {
+    setSinConexion(false);
+    setIsLoading(true);
+    setIntento((n) => n + 1);
+  };
 
   // Sin JWT no se permite continuar: se fuerza login.
   if (!token) {
@@ -54,8 +87,25 @@ function ProtectedRoute({ children, allowedRoles }) {
   // Estado intermedio mientras se confirma identidad/rol.
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-500">
+      <div role="status" className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-600">
         Validando sesión...
+      </div>
+    );
+  }
+
+  if (sinConexion) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4 p-4 text-center">
+        <p role="alert" className="text-slate-800">
+          No se pudo comprobar la sesión: no hay conexión. Las fotos guardadas en este móvil se conservan.
+        </p>
+        <button
+          type="button"
+          onClick={reintentar}
+          className="min-h-11 px-4 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+        >
+          Reintentar
+        </button>
       </div>
     );
   }
@@ -76,6 +126,8 @@ export default function App() {
   // Router raíz: define rutas públicas y privadas de la SPA.
   return (
     <BrowserRouter>
+      {/* PWA (#15): versión nueva o lista para usar sin conexión; arriba y en el flujo */}
+      <AvisoActualizacion />
       <Routes>
         {/* Rutas públicas */}
         <Route path="/login" element={<Login />} />
