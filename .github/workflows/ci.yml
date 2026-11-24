@@ -62,6 +62,66 @@ jobs:
       - name: Validar esquema OpenAPI
         run: python manage.py spectacular --validate --fail-on-warn --file /tmp/schema.yml
 
+  backend-postgres:
+    # La misma suite contra PostgreSQL 18, como en producción (Render): SQLite tolera cosas
+    # que Postgres no (max_length, orden sin order_by, IntegrityError dentro de un atomic...)
+    name: Backend (Django, PostgreSQL 18)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: checkIt
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: checkit
+          POSTGRES_PASSWORD: ci-insecure-db-password
+          POSTGRES_DB: checkit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U checkit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Valores de prueba: el workflow no necesita ningún secreto.
+      # Con DB_HOST, settings.py usa PostgreSQL; los tests crean y borran test_checkit.
+      SECRET_KEY: ci-insecure-test-key
+      DEBUG: "False"
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: checkit
+      DB_USER: checkit
+      DB_PASSWORD: ci-insecure-db-password
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # La versión de Render (checkIt/.python-version)
+          python-version-file: checkIt/.python-version
+          cache: pip
+          cache-dependency-path: checkIt/requirements.txt
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Comprobar migraciones pendientes
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Aplicar migraciones
+        # Como el preDeploy de Render: detecta migraciones que solo fallan en Postgres
+        run: python manage.py migrate --noinput
+
+      - name: Generar clave de firma efímera
+        run: python generar_certs.py
+
+      - name: Tests
+        run: python manage.py test
+
   frontend:
     name: Frontend (React + Vite)
     runs-on: ubuntu-latest
