@@ -99,8 +99,9 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # La versión de Render (checkIt/.python-version)
-          python-version-file: checkIt/.python-version
+          # La serie de Render (checkIt/.python-version fija 3.11.9, que el runner de
+          # Ubuntu 26.04 no tiene): 3.11 toma el último parche disponible
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: checkIt/requirements.txt
 
