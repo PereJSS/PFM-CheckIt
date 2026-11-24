@@ -69,3 +69,19 @@ class User(AbstractUser):
 
     def __str__(self):
         return f"{self.username} - {self.role_display()}"
+
+
+class RotacionRefresh(models.Model):
+    """De qué refresh nació cada uno al rotar. Si un refresh ya rotado vuelve cuando su sucesor
+    también se ha rotado, dos clientes tienen la misma cadena: posible robo. Se borra en cascada
+    con la purga diaria de los refresh caducados."""
+    padre = models.OneToOneField(
+        'token_blacklist.OutstandingToken', on_delete=models.CASCADE, related_name='rotacion',
+    )
+    hijo = models.OneToOneField(
+        'token_blacklist.OutstandingToken', on_delete=models.CASCADE, related_name='origen',
+    )
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.padre_id} → {self.hijo_id}'

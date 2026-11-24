@@ -274,7 +274,7 @@ Base URL: /api/v1
 | ------ | --------------- | ---------------------------- | ------- |
 | POST   | /auth/register/ | Registro de administrador    | Pública |
 | POST   | /auth/login/    | Obtiene access y refresh JWT | Pública |
-| POST   | /auth/refresh/  | Renueva access **y refresh**: el refresh enviado queda anulado (rotación); guarda siempre el nuevo | Pública |
+| POST   | /auth/refresh/  | Renueva access **y refresh**: el refresh enviado queda anulado (rotación); guarda siempre el nuevo. Si vuelve un refresh ya rotado cuyo sucesor también se rotó (dos clientes con la misma cadena: posible robo), se anulan todos los refresh del usuario; una respuesta perdida o un refresh cerrado con logout solo dan 401 | Pública |
 | POST   | /auth/logout/   | Anula el refresh enviado (`{"refresh": …}`); el access vale hasta que caduca | Pública |
 | GET    | /auth/me/       | Usuario autenticado actual   | JWT     |
 

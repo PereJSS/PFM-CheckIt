@@ -12,7 +12,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from core.testing import limitar
-from .models import User
+from .models import RotacionRefresh, User
 
 LOGIN = '/api/v1/auth/login/'
 REFRESH = '/api/v1/auth/refresh/'
@@ -193,3 +193,135 @@ class OpenApiAuthTest(APITestCase):
         self.assertIn('refresh', refresco)
         login = esquema['components']['schemas']['TokenObtainPair']['properties']
         self.assertTrue(login['access']['readOnly'] and login['refresh']['readOnly'])
+
+
+class ReutilizacionTest(_Base):
+    """Un refresh ya rotado que vuelve cuando su sucesor también se ha rotado indica que dos
+    clientes tienen la misma cadena (posible robo): se anulan todos los refresh del usuario.
+    Si el sucesor no se llegó a usar (respuesta perdida, carrera) o el refresh se cerró con
+    logout, solo se rechaza."""
+
+    def _envejecer(self, token, minutos):
+        BlacklistedToken.objects.filter(token__jti=RefreshToken(token, verify=False)['jti']).update(
+            blacklisted_at=timezone.now() - timedelta(minutes=minutos),
+        )
+
+    def _cadena(self):
+        """Otro dispositivo con su sesión y, en este, viejo → nuevo → actual."""
+        otro_dispositivo = self._login()
+        viejo = self._login()
+        nuevo = self._refrescar(viejo).data['refresh']
+        actual = self._refrescar(nuevo).data['refresh']
+        return otro_dispositivo, viejo, nuevo, actual
+
+    def test_la_rotacion_apunta_de_que_refresh_nace_cada_uno(self):
+        viejo = self._login()
+        nuevo = self._refrescar(viejo).data['refresh']
+        rotacion = RotacionRefresh.objects.get()
+        self.assertEqual(rotacion.padre.jti, RefreshToken(viejo, verify=False)['jti'])
+        self.assertEqual(rotacion.hijo.jti, RefreshToken(nuevo)['jti'])
+
+    def test_si_la_cadena_siguio_avanzando_anula_todos_los_refresh_del_usuario(self):
+        otro_dispositivo, viejo, _, actual = self._cadena()
+        with self.assertLogs('users.serializers', 'ERROR') as logs:
+            self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+        # La anulación se guarda aunque la respuesta sea 401
+        self.assertEqual(self._refrescar(actual).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_401_UNAUTHORIZED)
+        texto = '\n'.join(logs.output)
+        self.assertIn('anulados 2', texto)
+        for token in (viejo, actual, otro_dispositivo):
+            self.assertNotIn(token, texto)
+
+    def test_no_toca_los_refresh_de_otros_usuarios(self):
+        User.objects.create_user(username='op2', password='Pass1234!', role=User.Role.ADMIN)
+        ajeno = self.client.post(
+            LOGIN, {'username': 'op2', 'password': 'Pass1234!'}, format='json',
+        ).data['refresh']
+        _, viejo, _, _ = self._cadena()
+        self._refrescar(viejo)
+        self.assertEqual(self._refrescar(ajeno).status_code, status.HTTP_200_OK)
+
+    def test_respuesta_perdida_aunque_pasen_minutos_solo_rechaza(self):
+        # La PWA rota sin recibir la respuesta y reintenta con el viejo al volver la cobertura
+        otro_dispositivo = self._login()
+        viejo = self._login()
+        nuevo = self._refrescar(viejo).data['refresh']
+        self._envejecer(viejo, 30)
+        with self.assertLogs('users.serializers', 'WARNING') as logs:
+            self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn('ERROR', '\n'.join(logs.output))
+        self.assertEqual(self._refrescar(nuevo).status_code, status.HTTP_200_OK)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_200_OK)
+
+    def test_la_carrera_no_anula_nada_mas(self):
+        otro_dispositivo = self._login()
+        viejo = self._login()
+        nuevo = self._refrescar(viejo).data['refresh']
+        with patch.object(RefreshToken, 'check_blacklist', autospec=True, return_value=None):
+            self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(nuevo).status_code, status.HTTP_200_OK)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_200_OK)
+
+    def test_un_refresh_cerrado_con_logout_solo_rechaza(self):
+        otro_dispositivo = self._login()
+        token = self._login()
+        self.client.post(LOGOUT, {'refresh': token}, format='json')
+        self._envejecer(token, 30)
+        self.assertEqual(self._refrescar(token).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_200_OK)
+
+    def test_si_el_sucesor_se_cerro_con_logout_solo_rechaza(self):
+        otro_dispositivo = self._login()
+        viejo = self._login()
+        nuevo = self._refrescar(viejo).data['refresh']
+        self.client.post(LOGOUT, {'refresh': nuevo}, format='json')
+        self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_200_OK)
+
+    def test_caducados_y_ya_anulados_no_estorban(self):
+        _, viejo, _, actual = self._cadena()
+        OutstandingToken.objects.create(
+            user=self.usuario, jti='caducado', token='x', expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        anulado = OutstandingToken.objects.create(
+            user=self.usuario, jti='anulado', token='x', expires_at=timezone.now() + timedelta(days=1),
+        )
+        antes = BlacklistedToken.objects.create(token=anulado).blacklisted_at
+        self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(actual).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertFalse(BlacklistedToken.objects.filter(token__jti='caducado').exists())
+        self.assertEqual(BlacklistedToken.objects.get(token=anulado).blacklisted_at, antes)
+
+    def test_tras_la_anulacion_se_puede_volver_a_entrar(self):
+        _, viejo, _, _ = self._cadena()
+        self._refrescar(viejo)
+        self.assertEqual(self._refrescar(self._login()).status_code, status.HTTP_200_OK)
+
+    def test_un_token_falsificado_con_ese_jti_no_anula_nada(self):
+        # Sin firma válida no se sabe de quién es: no puede servir para echar a nadie
+        otro_dispositivo, viejo, _, _ = self._cadena()
+        cabecera, cuerpo, _ = viejo.split('.')
+        self.assertEqual(self._refrescar(f'{cabecera}.{cuerpo}.firmafalsa').status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self._refrescar(otro_dispositivo).status_code, status.HTTP_200_OK)
+
+    def test_si_falla_la_anulacion_sigue_siendo_401(self):
+        from users import serializers as modulo
+
+        _, viejo, _, _ = self._cadena()
+        self.client.raise_request_exception = False
+        with patch.object(modulo, '_anular_todos', side_effect=RuntimeError('BD caída')), \
+                self.assertLogs('users.serializers', 'ERROR'):
+            self.assertEqual(self._refrescar(viejo).status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_la_purga_borra_la_cadena_de_los_caducados(self):
+        from users.tasks import purgar_tokens_caducados
+
+        viejo = self._login()
+        self._refrescar(viejo)
+        OutstandingToken.objects.filter(jti=RefreshToken(viejo, verify=False)['jti']).update(
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        purgar_tokens_caducados()
+        self.assertFalse(RotacionRefresh.objects.exists())
