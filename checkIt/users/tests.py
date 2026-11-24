@@ -61,7 +61,9 @@ class RegisterAdminViewTest(APITestCase):
         self.addCleanup(cache.clear)
 
     def _payload(self, username='newadmin'):
+        from .invitaciones import crear
         return {
+            'invitacion': crear()[1],
             'username': username,
             'email': f'{username}@test.com',
             'first_name': 'Test',

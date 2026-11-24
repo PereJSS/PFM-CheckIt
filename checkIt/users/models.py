@@ -71,6 +71,28 @@ class User(AbstractUser):
         return f"{self.username} - {self.role_display()}"
 
 
+class Invitacion(models.Model):
+    """Enlace de un solo uso para darse de alta como administrador (cliente). Solo la crea el
+    superusuario (`manage.py crear_invitacion`). El token en claro solo existe en el enlace;
+    aquí queda su huella sha256. Si lleva email, el alta tiene que usar ese email."""
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    email = models.EmailField(blank=True, verbose_name='Email del invitado')
+    creada_en = models.DateTimeField(auto_now_add=True)
+    caduca_en = models.DateTimeField()
+    usada_en = models.DateTimeField(null=True, blank=True)
+    usada_por = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        verbose_name = 'invitación'
+        verbose_name_plural = 'invitaciones'
+        ordering = ['-creada_en']
+
+    def __str__(self):
+        return f'Invitación {self.pk} ({self.email or "sin email"})'
+
+
 class RotacionRefresh(models.Model):
     """De qué refresh nació cada uno al rotar. Si un refresh ya rotado vuelve cuando su sucesor
     también se ha rotado, dos clientes tienen la misma cadena: posible robo. Se borra en cascada

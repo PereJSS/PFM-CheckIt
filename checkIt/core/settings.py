@@ -222,6 +222,7 @@ REST_FRAMEWORK = {
         'paquete': config('PAQUETE_THROTTLE_RATE', default='10/hour'),
         'auth_login': config('AUTH_LOGIN_THROTTLE_RATE', default='10/min'),
         'auth_register': config('AUTH_REGISTER_THROTTLE_RATE', default='5/min'),
+        'auth_invitacion': config('AUTH_INVITACION_THROTTLE_RATE', default='10/min'),
         'auth_usuario': config('AUTH_USUARIO_THROTTLE_RATE', default='5/min'),
         # Por IP. El frontend refresca como mucho una vez cada 8 h por pestaña
         'auth_refresh': config('AUTH_REFRESH_THROTTLE_RATE', default='30/min'),
@@ -270,6 +271,9 @@ PDF_URL_CADUCIDAD_HORAS = config('PDF_URL_CADUCIDAD_HORAS', default=72, cast=int
 # Un PDF en GENERANDO más tiempo que esto es de un worker muerto y se puede volver a pedir.
 # Un intento dura como mucho 300 s (time_limit) y el reintento espera 60 s
 PDF_GENERANDO_CADUCA_MIN = config('PDF_GENERANDO_CADUCA_MIN', default=15, cast=int)
+
+# Base de los enlaces que imprime `manage.py crear_invitacion`
+FRONTEND_URL = config('FRONTEND_URL', default='https://pfm-check-it.vercel.app')
 
 CORS_ALLOWED_ORIGINS = [
     'https://pfm-check-it.vercel.app',

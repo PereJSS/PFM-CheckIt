@@ -21,14 +21,15 @@ from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 import integraciones.schema  # noqa: F401  (registra la extensión y anotaciones OpenAPI)
 import core.schema  # noqa: F401
-from users.views import ThrottledLogoutView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView, MeView, OperariosView, OperarioDetailView, RegisterAdminView
+from users.views import ThrottledLogoutView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView, MeView, OperariosView, OperarioDetailView, RegisterAdminView, ValidarInvitacionView
 
 urlpatterns = [
     
     path('admin/', admin.site.urls),
     
-    # Registro público de administrador
+    # Alta de administrador, solo con invitación
     path('api/v1/auth/register/', RegisterAdminView.as_view(), name='register'),
+    path('api/v1/auth/invitacion/', ValidarInvitacionView.as_view(), name='validar_invitacion'),
 
     # Rutas de Autenticación (Login y Refresco de Tokens)
     path('api/v1/auth/login/', ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),

@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 import hashlib
 import logging
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
@@ -12,7 +12,8 @@ from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.utils import datetime_from_epoch
-from .models import RotacionRefresh, User
+from . import invitaciones
+from .models import Invitacion, RotacionRefresh, User
 
 logger = logging.getLogger(__name__)
 
@@ -148,25 +149,70 @@ class RefrescoUsuarioActivoSerializer(TokenRefreshSerializer):
         return {'access': acceso, 'refresh': str(token)}
 
 
-class AdminRegisterSerializer(serializers.ModelSerializer):
+# El mismo texto para una invitación falsa, caducada o ya usada: no revela cuál de las tres es
+INVITACION_NO_VALIDA = 'Invitación no válida o caducada.'
+
+
+class _CampoInvitacion(serializers.Serializer):
+    invitacion = serializers.CharField(write_only=True, max_length=100)
+    # La invitación vigente, tras validar
+    invitacion_vigente: Invitacion | None = None
+
+    def to_internal_value(self, data):
+        # La invitación va antes que el resto de campos: sin una vigente, la respuesta es siempre
+        # la misma (si no, el 400 del alta diría qué usernames existen)
+        token = data.get('invitacion') if hasattr(data, 'get') else None
+        invitacion = invitaciones.vigente(token)
+        if invitacion is None:
+            logger.warning('Invitación no válida, caducada o ya usada presentada')
+            raise serializers.ValidationError({'invitacion': [INVITACION_NO_VALIDA]})
+        self.invitacion_vigente = invitacion
+        return super().to_internal_value(data)
+
+
+class ValidarInvitacionSerializer(_CampoInvitacion):
+    """Comprueba una invitación antes de enseñar el formulario de alta. No la gasta."""
+
+
+class AdminRegisterSerializer(_CampoInvitacion, serializers.ModelSerializer):
+    """Alta de un administrador (cliente) con una invitación de un solo uso."""
     password = serializers.CharField(write_only=True, validators=[validate_password])
     password2 = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ('username', 'email', 'first_name', 'last_name', 'password', 'password2')
+        fields = ('invitacion', 'username', 'email', 'first_name', 'last_name', 'password', 'password2')
 
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({'password2': 'Las contraseñas no coinciden.'})
+        nominativa = self.invitacion_vigente.email
+        if nominativa and (attrs.get('email') or '').strip().lower() != nominativa:
+            raise serializers.ValidationError({'email': 'Usa el email al que se envió la invitación.'})
         return attrs
 
     def create(self, validated_data):
+        validated_data.pop('invitacion')
         validated_data.pop('password2')
-        user = User.objects.create_user(
-            **validated_data,
-            role=User.Role.ADMIN,
-        )
+        pk = self.invitacion_vigente.pk
+        try:
+            with transaction.atomic():
+                # Gasto condicional: de dos altas a la vez con la misma invitación, solo una
+                # actualiza la fila. Si crear el usuario falla, la transacción la devuelve a libre
+                gastada = invitaciones.libres().filter(pk=pk).update(usada_en=timezone.now())
+                if not gastada:
+                    logger.warning('Invitación %s gastada o caducada mientras se rellenaba el alta', pk)
+                    raise serializers.ValidationError({'invitacion': [INVITACION_NO_VALIDA]})
+                user = User.objects.create_user(**validated_data, role=User.Role.ADMIN)
+                Invitacion.objects.filter(pk=pk).update(usada_por=user)
+        except IntegrityError:
+            # Dos altas a la vez con el mismo username: la segunda no ve el de la primera al
+            # validar. User.email no es único, así que solo puede ser el username
+            logger.info('Alta con invitación %s: username ocupado por un alta simultánea', pk)
+            raise serializers.ValidationError(
+                {'username': ['Ya existe un usuario con ese nombre.']},
+            ) from None
+        logger.info('Invitación %s usada: alta del administrador user_id=%s', pk, user.pk)
         return user
 
 

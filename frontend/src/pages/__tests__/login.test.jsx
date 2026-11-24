@@ -27,3 +27,10 @@ describe("Login: rol recordado (#15)", () => {
     await waitFor(() => expect(sessionStorage.getItem("rol")).toBe("OPERARIO"));
   });
 });
+
+describe("Login: registro cerrado (B3)", () => {
+  it("no enlaza a un registro público", () => {
+    render(<MemoryRouter><Login /></MemoryRouter>);
+    expect(screen.queryByRole("link", { name: /Regístrate/i })).toBeNull();
+  });
+});
