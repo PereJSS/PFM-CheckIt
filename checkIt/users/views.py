@@ -11,7 +11,10 @@ from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_sche
 from rest_framework import serializers
 from .throttles import LoginUsuarioThrottle
 from .models import User
-from .serializers import AdminRegisterSerializer, LoginSerializer, OperarioCreateSerializer, RefrescoUsuarioActivoSerializer
+from .serializers import (
+    AdminRegisterSerializer, LoginSerializer, OperarioCreateSerializer, RefrescoUsuarioActivoSerializer,
+    ValidarInvitacionSerializer,
+)
 
 
 # Límite de peticiones de los endpoints de sesión: 429 con Retry-After (segundos)
@@ -68,14 +71,48 @@ class ThrottledLogoutView(TokenBlacklistView):
     throttle_scope = 'auth_logout'
 
 
-class RegisterAdminView(APIView):
-    """Registro público para crear un usuario administrador."""
+class ValidarInvitacionView(APIView):
+    """Comprueba una invitación de alta sin gastarla. POST y no GET: el token en la query
+    quedaría en el log de acceso."""
     permission_classes = [AllowAny]
+    # Público: un JWT viejo que mande el navegador no debe convertir la respuesta en un 401
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth_invitacion'
+
+    @extend_schema(
+        request=ValidarInvitacionSerializer,
+        responses={
+            200: inline_serializer('InvitacionValida', {'email': serializers.EmailField(allow_blank=True)}),
+            400: OpenApiResponse(description='Invitación no válida, caducada o ya usada (mismo mensaje)'),
+            429: _429,
+        },
+        parameters=[_RETRY_AFTER],
+    )
+    def post(self, request):
+        serializer = ValidarInvitacionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Vacío si no es nominativa; si lo es, la pantalla de alta lo fija
+        return Response({'email': serializer.invitacion_vigente.email})
+
+
+class RegisterAdminView(APIView):
+    """Alta de un administrador (cliente). Solo con una invitación de un solo uso."""
+    permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth_register'
 
-    @extend_schema(request=AdminRegisterSerializer, responses={201: inline_serializer('RegistroOk', {
-        'detail': serializers.CharField(), 'username': serializers.CharField()})})
+    @extend_schema(
+        request=AdminRegisterSerializer,
+        responses={
+            201: inline_serializer('RegistroOk', {
+                'detail': serializers.CharField(), 'username': serializers.CharField()}),
+            400: OpenApiResponse(description='Datos no válidos o invitación no válida, caducada o ya usada'),
+            429: _429,
+        },
+        parameters=[_RETRY_AFTER],
+    )
     def post(self, request):
         serializer = AdminRegisterSerializer(data=request.data)
         if serializer.is_valid():

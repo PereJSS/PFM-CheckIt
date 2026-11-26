@@ -188,6 +188,8 @@ El proyecto usa python-decouple. Variables disponibles:
 | `AUTH_REFRESH_THROTTLE_RATE` | No   | Límite de refresco del token por IP (por defecto `30/min`) |
 | `AUTH_LOGOUT_THROTTLE_RATE` | No    | Límite de cierre de sesión por IP (por defecto `30/min`) |
 | `AUTH_REGISTER_THROTTLE_RATE` | No  | Límite de registro por IP (por defecto `5/min`) |
+| `AUTH_INVITACION_THROTTLE_RATE` | No | Límite de comprobación de invitaciones por IP (por defecto `10/min`) |
+| `FRONTEND_URL` | No | Base de los enlaces de invitación (por defecto `https://pfm-check-it.vercel.app`) |
 | `NUM_PROXIES`         | No          | Proxies de confianza delante de la app, para obtener la IP real de `X-Forwarded-For` (por defecto `1`). **En Render es `2`** (Cloudflare + balanceador de Render; verificado el 15 oct de 2026). Con un valor bajo, la identidad del throttling es la IP del proxy y los clientes comparten contador; con uno alto, se elude falsificando `X-Forwarded-For` |
 | `WEBHOOK_SALIENTE_TIMEOUT_CONEXION` | No | Timeout de conexión de los webhooks salientes en segundos (por defecto `3`) |
 | `WEBHOOK_SALIENTE_TIMEOUT` | No     | Timeout de lectura de los webhooks salientes en segundos (por defecto `5`) |
@@ -243,6 +245,16 @@ Sin `REDIS_URL`, el broker apunta a `redis://localhost:6379/0`. La API funciona 
 
 ---
 
+## Alta de clientes (invitaciones)
+
+El registro público está cerrado: cada administrador (cliente) se da de alta con un enlace de un solo uso que crea el superusuario desde la Shell de Render (o en local):
+
+```bash
+python manage.py crear_invitacion [--email cliente@empresa.com] [--dias 7]
+```
+
+Imprime el enlace una sola vez (`…/register#invitacion=<token>`); en la BD solo queda la huella sha256 del token. Con `--email`, solo vale para ese email. Caduca a los 7 días (1–30). Las invitaciones se ven en `/admin/` en solo lectura; borrar una la revoca. El enlace es una credencial: mándalo por un canal privado, no lo pegues en chats o tickets con registro.
+
 ## Datos de demo
 
 Desde checkIt/ con entorno virtual activo:
@@ -272,7 +284,8 @@ Base URL: /api/v1
 
 | Método | Ruta            | Descripción                  | Auth    |
 | ------ | --------------- | ---------------------------- | ------- |
-| POST   | /auth/register/ | Registro de administrador    | Pública |
+| POST   | /auth/invitacion/ | Comprueba una invitación sin gastarla (`{"invitacion": …}` → `{"email": …}`, vacío si no es nominativa). POST para que el token no quede en el log | Pública |
+| POST   | /auth/register/ | Alta de administrador **solo con invitación** (campo `invitacion`). La invitación vale una vez; falsa, caducada o usada dan el mismo `400`. Si es nominativa, el email tiene que coincidir | Pública |
 | POST   | /auth/login/    | Obtiene access y refresh JWT | Pública |
 | POST   | /auth/refresh/  | Renueva access **y refresh**: el refresh enviado queda anulado (rotación); guarda siempre el nuevo. Si vuelve un refresh ya rotado cuyo sucesor también se rotó (dos clientes con la misma cadena: posible robo), se anulan todos los refresh del usuario; una respuesta perdida o un refresh cerrado con logout solo dan 401 | Pública |
 | POST   | /auth/logout/   | Anula el refresh enviado (`{"refresh": …}`); el access vale hasta que caduca | Pública |
@@ -454,7 +467,7 @@ La documentación es pública porque la usan los integradores de PMS:
 
 El esquema se valida con `python manage.py spectacular --validate --fail-on-warn` (también en el CI).
 
-Límites (respuesta `429` con `Retry-After`): auditoría pública, login (por IP **y** por username), refresco, cierre de sesión, registro y webhooks de entrada; ver las variables `*_THROTTLE_RATE`. La IP del cliente se toma de `X-Forwarded-For` según `NUM_PROXIES`. Los contadores viven en la caché: en producción define `REDIS_URL` para que sean compartidos entre procesos.
+Límites (respuesta `429` con `Retry-After`): auditoría pública, login (por IP **y** por username), refresco, cierre de sesión, registro, comprobación de invitaciones y webhooks de entrada; ver las variables `*_THROTTLE_RATE`. La IP del cliente se toma de `X-Forwarded-For` según `NUM_PROXIES`. Los contadores viven en la caché: en producción define `REDIS_URL` para que sean compartidos entre procesos.
 
 ---
 
@@ -576,7 +589,7 @@ Esto permite ver cambios de estado y disponibilidad del botón de descarga de PD
 ## Flujo funcional resumido
 
 ```text
-Admin registra cuenta
+Admin se da de alta con su invitación
   -> crea propiedades
     -> crea operarios
       -> crea inspecciones
