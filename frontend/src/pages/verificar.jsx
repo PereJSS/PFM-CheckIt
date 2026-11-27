@@ -40,11 +40,16 @@ function avisosDe(comprobacion) {
   if (comprobacion.selloIndividual) sellos.push(comprobacion.selloIndividual);
   const noCuadra =
     !comprobacion.hashCoincide ||
-    comprobacion.manifiestos.some((m) => !m.inclusion) ||
+    comprobacion.manifiestos.some((m) => m.comprobable && !m.inclusion) ||
     sellos.some((sello) => sello.estado === "no_coincide" || sello.estado === "ilegible");
   if (noCuadra) {
     avisos.push(
       "La respuesta no se sostiene: lo que ha enviado el servidor no cuadra con el cálculo hecho aquí. Revisa cada comprobación.",
+    );
+  }
+  if (comprobacion.manifiestos.some((m) => !m.comprobable)) {
+    avisos.push(
+      "Algún manifiesto no se puede comprobar aquí: faltan datos o es un formato que esta página no conoce.",
     );
   }
   if (!comprobacion.horasCoinciden) {
@@ -178,6 +183,15 @@ function Declarado({ sello }) {
   );
 }
 
+function textoInclusion(manifiesto) {
+  if (manifiesto.inclusion) return "La foto está incluida en este manifiesto.";
+  // Sin hoja que rehacer no hay ruta que comprobar: decir que no lleva a la raíz sería falso
+  if (!manifiesto.comprobable) {
+    return "No se puede comprobar: faltan datos o es un formato de manifiesto que esta página no conoce.";
+  }
+  return "La foto no está incluida: la ruta no lleva a la raíz.";
+}
+
 function TarjetaManifiesto({ manifiesto, numero, total }) {
   const { sello } = manifiesto;
   const archivo = `sello-manifiesto-${numero}.tst`;
@@ -191,9 +205,7 @@ function TarjetaManifiesto({ manifiesto, numero, total }) {
       </p>
       <ul className="space-y-1">
         <Comprobacion correcta={manifiesto.inclusion}>
-          {manifiesto.inclusion
-            ? "La foto está incluida en este manifiesto."
-            : "La foto no está incluida: la ruta no lleva a la raíz."}
+          {textoInclusion(manifiesto)}
         </Comprobacion>
         <Comprobacion correcta={sello.estado === "coincide"}>{TEXTO_SELLO[sello.estado]}</Comprobacion>
       </ul>

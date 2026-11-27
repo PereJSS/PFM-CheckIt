@@ -13,6 +13,10 @@ ningún otro sitio. Comprueba:
 3. Que cada foto tiene el hash de su hoja, que su ruta de inclusión lleva a esa
    raíz y que su sello individual (si lo tiene) es de ese hash.
 
+En la versión 2 del manifiesto cada hoja sella también los metadatos de la foto
+(estancia, descripción, punto del checklist, hora del dispositivo) y la última, el
+checklist: cambiar cualquiera de ellos en manifiesto.json cambia la raíz.
+
 No comprueba la firma de los sellos ni la del PDF: eso se hace con openssl y con
 un validador PAdES (ver LEEME.txt). Sin esa comprobación, quien rehiciera todo el
 paquete con otros sellos también pasaría este script.
@@ -78,6 +82,132 @@ def verificar_inclusion(hoja, indice, total, prueba, raiz_esperada):
     return sn == 0 and r == raiz_esperada
 
 
+# Formato de las hojas (ADR-005). Esta es la referencia: el backend de CheckIt importa
+# estas funciones, así que el servidor y verificar.py no pueden dar bytes distintos.
+# v1: el dato de cada hoja es el SHA-256 de la foto.
+# v2: foto = 0x01 ‖ sha256(foto) ‖ sha256(metadatos con sal); checklist (última hoja,
+# opcional) = 0x02 ‖ sha256({checklist, sal}). El primer byte separa los tipos.
+VERSIONES = (1, 2)
+_HEX = frozenset('0123456789abcdef')
+# Topes: un manifiesto guardado o un paquete hostil no deben agotar la pila ni la CPU
+MAX_PROFUNDIDAD = 32
+MAX_BYTES_HOJA = 1024 * 1024
+
+
+def _es_hex(valor, largo):
+    return isinstance(valor, str) and len(valor) == largo and _HEX.issuperset(valor)
+
+
+def _sin_decimales(valor, profundidad=0):
+    if profundidad > MAX_PROFUNDIDAD:
+        raise ValueError('JSON demasiado anidado')
+    if isinstance(valor, float):
+        raise ValueError('el formato canónico no admite decimales')
+    if isinstance(valor, dict):
+        for clave, contenido in valor.items():
+            if not isinstance(clave, str):
+                raise ValueError('las claves tienen que ser texto')
+            _sin_decimales(contenido, profundidad + 1)
+    elif isinstance(valor, (list, tuple)):
+        for contenido in valor:
+            _sin_decimales(contenido, profundidad + 1)
+
+
+def json_canonico(valor):
+    """Bytes canónicos de un JSON: claves ordenadas por punto de código, sin espacios,
+    UTF-8, sin decimales y con un tope de anidamiento. Es un formato propio: coincide con
+    RFC 8785 mientras las claves no tengan caracteres fuera del plano básico."""
+    _sin_decimales(valor)
+    datos = json.dumps(
+        valor, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False,
+    ).encode('utf-8')
+    if len(datos) > MAX_BYTES_HOJA:
+        raise ValueError('hoja demasiado grande')
+    return datos
+
+
+def version_de(manifiesto):
+    """Versión del manifiesto; sin el campo es v1. Una versión que no se conoce es un error:
+    no se sabe qué sella."""
+    if not isinstance(manifiesto, dict):
+        raise ValueError('el manifiesto no es un objeto')
+    version = manifiesto.get('version', 1)
+    # type() y no isinstance: True no es la versión 1
+    if type(version) is not int or version not in VERSIONES:
+        raise ValueError(f'versión de manifiesto no admitida: {version!r}')
+    return version
+
+
+def _hash_foto(hoja):
+    sha256 = hoja.get('sha256')
+    if not _es_hex(sha256, 64):
+        raise ValueError('hoja sin un SHA-256 en hexadecimal minúsculo')
+    return bytes.fromhex(sha256)
+
+
+def datos_hoja(hoja, version):
+    """Bytes que entran en el árbol por esta hoja (antes del prefijo 0x00 de RFC 6962)."""
+    if not isinstance(hoja, dict):
+        raise ValueError('hoja mal formada')
+    if version == 1:
+        return _hash_foto(hoja)
+    if version != 2:
+        raise ValueError(f'versión de manifiesto no admitida: {version!r}')
+    tipo = hoja.get('tipo')
+    if tipo == 'foto':
+        metadatos = hoja.get('metadatos')
+        if not isinstance(metadatos, dict) or not _es_hex(metadatos.get('sal'), 32):
+            raise ValueError('hoja de foto sin metadatos o sin una sal válida')
+        # La evidencia con la que se busca la foto tiene que ser la sellada
+        evidencia = hoja.get('evidencia')
+        if type(evidencia) is not int or type(metadatos.get('evidencia')) is not int \
+                or metadatos['evidencia'] != evidencia:
+            raise ValueError('la evidencia de la hoja no es la de sus metadatos')
+        return b'\x01' + _hash_foto(hoja) + _sha256(json_canonico(metadatos))
+    if tipo == 'checklist':
+        if not isinstance(hoja.get('checklist'), dict) or not _es_hex(hoja.get('sal'), 32):
+            raise ValueError('hoja del checklist sin checklist o sin una sal válida')
+        return b'\x02' + _sha256(json_canonico({'checklist': hoja['checklist'], 'sal': hoja['sal']}))
+    raise ValueError(f'tipo de hoja desconocido: {tipo!r}')
+
+
+def tiene_foto(hoja, version):
+    """Si la hoja corresponde a una foto (en v1, todas; en v2, las de tipo foto)."""
+    return version == 1 or hoja['tipo'] == 'foto'
+
+
+def hoja_de_checklist(manifiesto):
+    """La hoja del checklist de un manifiesto v2 ya validado, o None."""
+    hojas = manifiesto['hojas']
+    return hojas[-1] if hojas and hojas[-1].get('tipo') == 'checklist' else None
+
+
+def metadatos_sha256(hoja):
+    """Hash (hex) de los metadatos de una hoja de foto v2; None en las demás. Con la sal
+    dentro no deja adivinar los metadatos, así que se puede enseñar sin ellos."""
+    if not isinstance(hoja, dict) or hoja.get('tipo') != 'foto':
+        return None
+    datos_hoja(hoja, 2)
+    return hashlib.sha256(json_canonico(hoja['metadatos'])).hexdigest()
+
+
+def hojas_del_manifiesto(manifiesto):
+    """Datos de todas las hojas, en orden. ValueError si alguna no se puede interpretar."""
+    version = version_de(manifiesto)
+    hojas = manifiesto.get('hojas')
+    if not isinstance(hojas, list):
+        raise ValueError('las hojas del manifiesto no son una lista')
+    datos = [datos_hoja(hoja, version) for hoja in hojas]
+    if version == 2:
+        checklists = [i for i, hoja in enumerate(hojas) if hoja['tipo'] == 'checklist']
+        if checklists and checklists != [len(hojas) - 1]:
+            raise ValueError('la hoja del checklist tiene que ser una sola y la última')
+        evidencias = [hoja['evidencia'] for hoja in hojas if hoja['tipo'] == 'foto']
+        if len(set(evidencias)) != len(evidencias):
+            raise ValueError('dos hojas de la misma evidencia')
+    return datos
+
+
 def _der(datos, etiqueta_esperada):
     """Contenido y resto de un elemento DER con la etiqueta esperada."""
     if len(datos) < 2 or datos[0] != etiqueta_esperada:
@@ -128,6 +258,20 @@ def _ruta_segura(nombre):
     if nombre.startswith('/') or '..' in partes or ':' in nombre:
         raise ValueError(f'ruta no permitida: {nombre}')
     return os.path.join(*partes)
+
+
+def _sin_duplicadas(pares):
+    objeto = {}
+    for clave, valor in pares:
+        if clave in objeto:
+            raise ValueError(f'clave duplicada en el JSON: {clave!r}')
+        objeto[clave] = valor
+    return objeto
+
+
+def _leer_json(nombre):
+    # Con claves repetidas, otro lector podría quedarse con otra versión del dato
+    return json.loads(_leer(nombre), object_pairs_hook=_sin_duplicadas)
 
 
 def _leer(nombre):
@@ -183,26 +327,35 @@ def comprobar_sumas(informe):
 
 def comprobar_manifiesto(informe):
     print('\n2. Raíz del manifiesto Merkle')
-    manifiesto = json.loads(_leer('manifiesto/manifiesto.json'))
-    hojas = [bytes.fromhex(h['sha256']) for h in manifiesto['hojas']]
+    manifiesto = _leer_json('manifiesto/manifiesto.json')
+    version = version_de(manifiesto)
+    hojas = hojas_del_manifiesto(manifiesto)
     calculada = raiz(hojas).hex()
-    if calculada == manifiesto['raiz']:
-        informe.ok(f'raíz {calculada} ({len(hojas)} hojas)')
+    cuadra = calculada == manifiesto['raiz']
+    if cuadra:
+        informe.ok(f'raíz {calculada} ({len(hojas)} hojas, versión {version})')
     else:
         informe.fallo(f'la raíz recalculada {calculada} no es la del manifiesto {manifiesto["raiz"]}')
     sellada = huella_sellada(_leer('manifiesto/raiz.tst'))
     if sellada == calculada:
         informe.ok('manifiesto/raiz.tst sella esa raíz')
     else:
+        cuadra = False
         informe.fallo(f'manifiesto/raiz.tst sella {sellada}, no la raíz recalculada')
+    # El checklist no tiene foto: queda probado si su hoja entra en la raíz sellada
+    if version == 2 and cuadra and hoja_de_checklist(manifiesto):
+        informe.ok(f'checklist sellado (hoja {len(hojas) - 1})')
     return manifiesto
 
 
 def comprobar_evidencias(informe, manifiesto):
     print('\n3. Cada foto, su hoja y su ruta hasta la raíz')
-    expediente = json.loads(_leer('expediente.json'))
+    expediente = _leer_json('expediente.json')
     raiz_sellada = bytes.fromhex(manifiesto['raiz'])
-    vistas = set()
+    version = version_de(manifiesto)
+    hojas = hojas_del_manifiesto(manifiesto)
+    # Solo las hojas de foto necesitan una foto
+    vistas = {i for i, h in enumerate(manifiesto['hojas']) if not tiene_foto(h, version)}
     for ficha in expediente['evidencias']:
         archivo = ficha['archivo']
         try:
@@ -212,13 +365,25 @@ def comprobar_evidencias(informe, manifiesto):
             informe.fallo(f'{archivo}: {e}')
             continue
         indice = prueba['indice']
-        hoja = manifiesto['hojas'][indice] if 0 <= indice < len(manifiesto['hojas']) else {}
+        if type(indice) is not int or not 0 <= indice < len(hojas):
+            informe.fallo(f'{archivo}: su prueba apunta a una hoja que no existe')
+            continue
+        hoja = manifiesto['hojas'][indice]
+        if not tiene_foto(hoja, version) or (version == 2 and hoja['evidencia'] != ficha.get('evidencia')):
+            informe.fallo(f'{archivo}: la hoja {indice} no es la de esta foto')
+            continue
         real = hashlib.sha256(datos).hexdigest()
         if real != hoja.get('sha256'):
             informe.fallo(f'{archivo}: su hash no es el de la hoja {indice} del manifiesto')
             continue
+        if version == 2:
+            # Lo que enseña el expediente tiene que ser lo sellado, no otra cosa
+            distintos = [c for c in CAMPOS_SELLADOS if ficha.get(c) != hoja['metadatos'].get(c)]
+            if distintos:
+                informe.fallo(f'{archivo}: {", ".join(distintos)} de expediente.json no es lo sellado')
+                continue
         ruta = [bytes.fromhex(h) for h in prueba['ruta']]
-        if not verificar_inclusion(bytes.fromhex(real), indice, len(manifiesto['hojas']), ruta, raiz_sellada):
+        if not verificar_inclusion(hojas[indice], indice, len(hojas), ruta, raiz_sellada):
             informe.fallo(f'{archivo}: la ruta de inclusión no lleva a la raíz sellada')
             continue
         if ficha.get('sello') and huella_sellada(_leer(ficha['sello'])) != real:
@@ -226,9 +391,35 @@ def comprobar_evidencias(informe, manifiesto):
             continue
         vistas.add(indice)
         informe.ok(f'{archivo} (hoja {indice})')
-    faltan = set(range(len(manifiesto['hojas']))) - vistas
+    faltan = set(range(len(hojas))) - vistas
     if faltan:
         informe.fallo(f'hojas del manifiesto sin foto verificada: {sorted(faltan)}')
+    if version == 2:
+        comprobar_checklist(informe, manifiesto, expediente)
+
+
+# Metadatos de cada foto que expediente.json enseña y que en v2 van sellados
+CAMPOS_SELLADOS = ('estancia', 'descripcion', 'punto', 'capturada_en')
+# Campos del checklist de expediente.json que explican, no que se sellan
+_NOTAS_CHECKLIST = ('sellado', 'nota')
+
+
+def comprobar_checklist(informe, manifiesto, expediente):
+    """v2: el checklist de expediente.json es el de la hoja sellada, y solo hay uno si la hay."""
+    hoja = hoja_de_checklist(manifiesto)
+    mostrado = expediente.get('checklist')
+    if hoja is None and mostrado is None:
+        return
+    if hoja is None:
+        informe.fallo('expediente.json enseña un checklist que no está en el manifiesto sellado')
+    elif not isinstance(mostrado, dict):
+        informe.fallo('el manifiesto sella un checklist que expediente.json no enseña')
+    else:
+        sin_notas = {k: v for k, v in mostrado.items() if k not in _NOTAS_CHECKLIST}
+        if json_canonico(sin_notas) == json_canonico(hoja['checklist']):
+            informe.ok('el checklist de expediente.json es el sellado')
+        else:
+            informe.fallo('el checklist de expediente.json no es el sellado')
 
 
 def main():
@@ -241,7 +432,7 @@ def main():
         comprobar_sumas(informe)
         manifiesto = comprobar_manifiesto(informe)
         comprobar_evidencias(informe, manifiesto)
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
         informe.fallo(f'paquete incompleto o mal formado: {e}')
     if informe.fallos:
         print(f'\nRESULTADO: FALLO ({informe.fallos} comprobaciones no superadas)')

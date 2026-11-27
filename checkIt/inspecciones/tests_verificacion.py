@@ -26,9 +26,10 @@ from users.models import User
 from .models import Evidencia, Inspeccion, generar_clave_verificacion
 from .services import merkle
 from .services.verificacion import MAX_MANIFIESTOS, _sello_individual, _sello_vigente, buscar
-from .services.verificador_paquete import huella_sellada
+from .services.verificador_paquete import datos_hoja, hojas_del_manifiesto, huella_sellada, metadatos_sha256
 from .tests import _make_image
 from .tests_sellos import _crear_tsa, _post_con_tsa, _sello, _texto
+from .tests_manifiesto_v2 import hoja_checklist, hoja_foto
 from .verificacion_publica import MAX_CUERPO, CuerpoAcotadoParser, VerificacionSerializer
 
 
@@ -256,6 +257,8 @@ class PruebaDeInclusionTest(_Base):
         self._completar()
         m = self._consultar(_hash(1))['manifiestos'][0]
         self.assertEqual((m['version'], m['arbol'], m['vigente']), (1, 'RFC6962-SHA256', True))
+        # En v1 la hoja es la foto: no hay metadatos sellados
+        self.assertIsNone(m['metadatos_sha256'])
 
 
 class SinClaveNoSeAprendeNadaTest(_Base):
@@ -312,7 +315,9 @@ class SinClaveNoSeAprendeNadaTest(_Base):
         self.assertEqual(set(data), {'hash', 'manifiestos', 'sello_individual', 'anomalias', 'truncado'})
         self.assertEqual(set(data['sello_individual']), {'token', 'timestamp'})
         m = data['manifiestos'][0]
-        self.assertEqual(set(m), {'vigente', 'version', 'arbol', 'raiz', 'indice', 'total', 'prueba', 'sello'})
+        self.assertEqual(set(m), {
+            'vigente', 'version', 'arbol', 'raiz', 'indice', 'total', 'prueba', 'metadatos_sha256', 'sello',
+        })
         self.assertEqual(set(m['sello']), {'token', 'timestamp', 'url', 'cualificada', 'verificado'})
 
     def test_sin_datos_del_cliente_ni_la_propia_clave(self):
@@ -542,7 +547,8 @@ class ContratoHttpTest(_Base):
         entrada = self._entrada(
             _hash(1), tsa_timestamp={'no': 'fecha'}, tsa_url=5, tsa_cualificada='si', tsa_verificado=1,
         )
-        entrada['manifiesto'].update(version='x', arbol=7)
+        # Una versión rara ya no se tolera (ADR-005): ver ManifiestoV2Test.test_version_desconocida_es_una_anomalia
+        entrada['manifiesto'].update(arbol=7)
         self._archivo([entrada])
         data = self._consultar(_hash(1))
         serializer = VerificacionSerializer(data=data)
@@ -797,6 +803,119 @@ class DatosCorruptosTest(_Base):
         self.assertEqual(data['anomalias'], 1)
 
 
+class ManifiestoV2Test(_Base):
+    """ADR-005: la hoja v2 sella la foto con sus metadatos. Quien consulta solo recibe el hash
+    con sal de los metadatos, con el que rehace la hoja a partir de su foto."""
+
+    def setUp(self):
+        super().setUp()
+        self.ev1 = self._evidencia(_hash(1))
+        self.ev2 = self._evidencia(_hash(2))
+        self.manifiesto = self._v2(
+            hoja_foto(self.ev1.pk, _hash(1)),
+            hoja_foto(self.ev2.pk, _hash(2), sal='ab' * 16, estancia='Baño secreto'),
+            hoja_checklist(),
+        )
+
+    def _v2(self, *hojas):
+        manifiesto = {'version': 2, 'algoritmo': 'sha256', 'arbol': 'RFC6962-SHA256', 'hojas': list(hojas)}
+        manifiesto['raiz'] = merkle.raiz(hojas_del_manifiesto(manifiesto)).hex()
+        return manifiesto
+
+    def _vigente(self, manifiesto, raiz=None):
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            estado=Inspeccion.Estado.COMPLETADA, manifiesto=manifiesto, manifiesto_raiz=raiz or manifiesto['raiz'],
+        )
+
+    def _hoja_como_el_navegador(self, foto, m):
+        # Lo que puede rehacer quien solo tiene la foto y la respuesta
+        return b'\x01' + bytes.fromhex(foto) + bytes.fromhex(m['metadatos_sha256'])
+
+    def test_prueba_de_una_foto_v2_con_sus_metadatos(self):
+        self._vigente(self.manifiesto)
+        for indice, (foto, hoja) in enumerate(zip((_hash(1), _hash(2)), self.manifiesto['hojas'])):
+            m = self._consultar(foto)['manifiestos'][0]
+            self.assertEqual((m['version'], m['indice'], m['total']), (2, indice, 3))
+            self.assertEqual(m['metadatos_sha256'], metadatos_sha256(hoja))
+            hoja_rehecha = self._hoja_como_el_navegador(foto, m)
+            self.assertEqual(hoja_rehecha, datos_hoja(hoja, 2))
+            self.assertTrue(merkle.verificar_inclusion(
+                hoja_rehecha, m['indice'], m['total'], [bytes.fromhex(p) for p in m['prueba']],
+                bytes.fromhex(m['raiz']),
+            ))
+
+    def test_no_devuelve_los_metadatos_ni_la_sal(self):
+        self._vigente(self.manifiesto)
+        cuerpo = json.dumps(self._consultar(_hash(2)))
+        for dato in ('Baño', 'Cocina', 'estancia', 'sal', 'ab' * 16, 'checklist', 'Horno', 'capturada'):
+            self.assertNotIn(dato, cuerpo)
+
+    def test_v1_archivado_y_v2_vigente(self):
+        self._archivo([self._entrada(_hash(1))])
+        self._vigente(self.manifiesto)
+        data = self._consultar(_hash(1))
+        self.assertEqual([(m['version'], m['vigente']) for m in data['manifiestos']], [(1, False), (2, True)])
+        self.assertIsNone(data['manifiestos'][0]['metadatos_sha256'])
+        self.assertEqual(data['anomalias'], 0)
+
+    def test_v2_archivado(self):
+        entrada = {**self._entrada(_hash(1)), 'manifiesto': self.manifiesto, 'raiz': self.manifiesto['raiz']}
+        self._archivo([entrada])
+        m = self._consultar(_hash(1))['manifiestos'][0]
+        self.assertEqual((m['version'], m['vigente'], m['total']), (2, False, 3))
+
+    def test_metadatos_cambiados_tras_sellar_se_detectan(self):
+        # Alguien cambia la estancia en la BD: la hoja ya no lleva a la raíz sellada
+        sellada = self.manifiesto['raiz']
+        self.manifiesto['hojas'][0]['metadatos']['estancia'] = 'Salón'
+        self._vigente(self.manifiesto, raiz=sellada)
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(1))
+        self.assertEqual(data['anomalias'], 1)
+        # Se devuelve igual: quien consulta ve que no cuadra
+        m = data['manifiestos'][0]
+        self.assertFalse(merkle.verificar_inclusion(
+            self._hoja_como_el_navegador(_hash(1), m), m['indice'], m['total'],
+            [bytes.fromhex(p) for p in m['prueba']], bytes.fromhex(sellada),
+        ))
+
+    def test_version_desconocida_es_una_anomalia(self):
+        self._vigente({**self.manifiesto, 'version': 3})
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(1))
+        self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_hoja_v2_mal_formada_es_una_anomalia(self):
+        del self.manifiesto['hojas'][1]['metadatos']['sal']
+        self._vigente(self.manifiesto)
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(1))
+        self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_metadatos_desmesurados_son_una_anomalia_y_no_un_500(self):
+        # 200 niveles: Django aún los guarda y pasan con creces el tope de profundidad
+        profundo = {}
+        for _ in range(200):
+            profundo = {'a': profundo}
+        self.manifiesto['hojas'][0]['metadatos']['descripcion'] = profundo
+        self._vigente(self.manifiesto)
+        with self.assertLogs('inspecciones.services.verificacion', level='ERROR'):
+            data = self._consultar(_hash(1))
+        self.assertEqual((data['manifiestos'], data['anomalias']), ([], 1))
+
+    def test_la_hoja_del_checklist_no_se_confunde_con_una_foto(self):
+        self._vigente(self.manifiesto)
+        # Ninguna foto puede tener el hash de los datos del checklist
+        checklist = datos_hoja(self.manifiesto['hojas'][2], 2)[1:].hex()
+        self._no_encontrada(checklist)
+
+    def test_cumple_el_esquema_publicado(self):
+        self._vigente(self.manifiesto)
+        data = self._consultar(_hash(1))
+        serializer = VerificacionSerializer(data=data)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
 class VectoresDelFrontendTest(SimpleTestCase):
     """La página comprueba las pruebas en JS: sus vectores salen de aquí. Si cambia el árbol
     o el sello en Python, esto falla y hay que regenerarlos."""
@@ -835,6 +954,19 @@ class VectoresDelFrontendTest(SimpleTestCase):
         ))
         self.assertEqual(huella_sellada(base64.b64decode(caso['token_raiz'])), caso['raiz'])
         self.assertEqual(huella_sellada(base64.b64decode(caso['token_foto'])), caso['foto'])
+
+    def test_respuesta_v2(self):
+        # El navegador rehace la hoja con la foto y metadatos_sha256: tiene que dar los mismos
+        # bytes que la referencia a partir de los metadatos sellados
+        caso = self.vectores['respuesta_v2']
+        hoja = {'tipo': 'foto', 'evidencia': caso['evidencia'], 'sha256': caso['foto'], 'metadatos': caso['metadatos']}
+        self.assertEqual(metadatos_sha256(hoja), caso['metadatos_sha256'])
+        self.assertEqual(datos_hoja(hoja, 2).hex(), caso['hoja'])
+        self.assertEqual(caso['hoja'], '01' + caso['foto'] + caso['metadatos_sha256'])
+        self.assertTrue(merkle.verificar_inclusion(
+            bytes.fromhex(caso['hoja']), caso['indice'], caso['total'],
+            [bytes.fromhex(nodo) for nodo in caso['prueba']], bytes.fromhex(caso['raiz']),
+        ))
 
     def test_sellos_invalidos(self):
         for caso in self.vectores['sellos_invalidos']:

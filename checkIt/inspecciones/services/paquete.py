@@ -27,6 +27,7 @@ from . import merkle
 from .almacen import abrir_pdf
 from .checklist import checklist_canonico
 from .tsa import PERFIL_EVIDENCIAS, PERFIL_MANIFIESTO, configuracion, url_segura
+from .verificador_paquete import CAMPOS_SELLADOS, hoja_de_checklist, hojas_del_manifiesto, tiene_foto, version_de
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +122,23 @@ class _Zip:
 def _añadir_evidencias(paquete, inspeccion):
     """Fotos del manifiesto con su sello y su prueba; devuelve (fichas, avisos)."""
     manifiesto = inspeccion.manifiesto
-    hojas = [bytes.fromhex(h['sha256']) for h in manifiesto['hojas']]
+    try:
+        version = version_de(manifiesto)
+        hojas = hojas_del_manifiesto(manifiesto)
+        # Lo que se lee más abajo: si falta, también es un manifiesto ilegible (409, no 500)
+        if not all(isinstance(manifiesto[campo], str) for campo in ('arbol', 'raiz')):
+            raise ValueError('árbol o raíz mal formados')
+        if any(type(hoja.get('evidencia')) is not int for hoja in manifiesto['hojas'] if hoja.get('tipo') != 'checklist'):
+            raise ValueError('hoja sin evidencia')
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.error('Paquete probatorio de la inspección %s: manifiesto sellado ilegible: %s', inspeccion.pk, exc)
+        raise IntegridadRota(f'El manifiesto sellado de la inspección {inspeccion.pk} no se puede interpretar.') from exc
     evidencias = inspeccion.evidencias.in_bulk()
     fichas = []
     for indice, hoja in enumerate(manifiesto['hojas']):
+        if not tiene_foto(hoja, version):
+            # El checklist no tiene foto: verificar.py lo comprueba desde manifiesto.json
+            continue
         evidencia = evidencias.pop(hoja['evidencia'], None)
         datos = _leer_foto(evidencia) if evidencia else None
         if datos is None or hashlib.sha256(datos).hexdigest() != hoja['sha256']:
@@ -147,22 +161,33 @@ def _añadir_evidencias(paquete, inspeccion):
             'evidencia': evidencia.pk,
             'archivo': archivo,
             'arbol': manifiesto['arbol'],
+            'version': version,
             'indice': indice,
             'total': len(hojas),
+            # hoja_sha256 es el hash de la foto; hoja, lo que entra en el árbol (en v1, lo mismo)
             'hoja_sha256': hoja['sha256'],
+            'hoja': hojas[indice].hex(),
             'ruta': [h.hex() for h in merkle.prueba_inclusion(hojas, indice)],
             'raiz': manifiesto['raiz'],
         })
+        if version == 2:
+            # Sellados en la hoja: se enseña lo sellado, que es lo que verificar.py compara
+            declarados = {campo: hoja['metadatos'].get(campo) for campo in CAMPOS_SELLADOS}
+        else:
+            declarados = {
+                'descripcion': evidencia.descripcion or '',
+                # Declarada por el operario: fuera del manifiesto v1 y sin sello
+                'estancia': evidencia.estancia,
+                # Punto del checklist que documenta (#19): declarado, fuera del manifiesto v1
+                'punto': evidencia.punto_id,
+                # Declarada por el dispositivo: fuera del manifiesto v1 y sin sello
+                'capturada_en': _iso(evidencia.capturada_en),
+            }
         fichas.append({
             'evidencia': evidencia.pk,
             'archivo': archivo,
-            'descripcion': evidencia.descripcion or '',
-            # Declarada por el operario: fuera del manifiesto y sin sello
-            'estancia': evidencia.estancia,
-            # Punto del checklist que documenta (#19): declarado, fuera del manifiesto
-            'punto': evidencia.punto_id,
-            # Declarada por el dispositivo: fuera del manifiesto y sin sello
-            'capturada_en': _iso(evidencia.capturada_en),
+            **declarados,
+            'metadatos_sellados': version == 2,
             'capturada_en_certificada': False,
             'avisos_hora': evidencia.avisos_hora(),
             'fecha_captura': _iso(evidencia.fecha_captura),
@@ -232,6 +257,16 @@ def _añadir_certificados_tsa(paquete):
 
 
 def _checklist(inspeccion):
+    if version_de(inspeccion.manifiesto) == 2:
+        # El sellado en la última hoja, no el de la BD: verificar.py los compara
+        hoja = hoja_de_checklist(inspeccion.manifiesto)
+        if hoja is None:
+            return None
+        return {
+            'sellado': True,
+            'nota': 'Sellado en la última hoja del manifiesto (versión 2).',
+            **hoja['checklist'],
+        }
     datos = checklist_canonico(inspeccion)
     if datos is None:
         return None
