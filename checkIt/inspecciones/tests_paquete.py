@@ -35,6 +35,8 @@ from .models import Evidencia, Inspeccion
 from .services import merkle
 from .services.manifiesto import congelar_manifiesto, reabrir_manifiesto
 from .tests import _make_image
+from .services.verificador_paquete import datos_hoja, hojas_del_manifiesto
+from .tests_manifiesto_v2 import hoja_checklist, hoja_foto
 from .tests_sellos import _crear_tsa, _guardar_pem, _post_con_tsa
 
 PDF = b'%PDF-1.7 firmado'
@@ -68,6 +70,21 @@ def _foto(n):
 class _ConExpediente:
     """Inspección completada con `n` fotos selladas, manifiesto sellado y PDF de esa raíz."""
 
+    # 2: el manifiesto congelado se rehace en formato v2 (ADR-005) antes de sellarlo
+    version_manifiesto = 1
+
+    def _pasar_a_v2(self):
+        manifiesto = Inspeccion.objects.values_list('manifiesto', flat=True).get(pk=self.inspeccion.pk)
+        hojas = [
+            hoja_foto(h['evidencia'], h['sha256'], sal=f'{i:032x}', estancia=f'Estancia {i}')
+            for i, h in enumerate(manifiesto['hojas'])
+        ] + [hoja_checklist()]
+        manifiesto = {**manifiesto, 'version': 2, 'hojas': hojas}
+        manifiesto['raiz'] = merkle.raiz(hojas_del_manifiesto(manifiesto)).hex()
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
+            manifiesto=manifiesto, manifiesto_raiz=manifiesto['raiz'],
+        )
+
     def _crear_expediente(self, n=2):
         self.admin = User.objects.create_user(username='admin_p', password='Pass1234!', role=User.Role.ADMIN)
         self.operario = User.objects.create_user(username='op_p', password='Pass1234!', role=User.Role.OPERARIO)
@@ -76,6 +93,8 @@ class _ConExpediente:
         self.fotos = [self._evidencia(_foto(i)) for i in range(n)]
         Inspeccion.objects.filter(pk=self.inspeccion.pk).update(estado=Inspeccion.Estado.COMPLETADA)
         congelar_manifiesto(self.inspeccion.pk)
+        if self.version_manifiesto == 2:
+            self._pasar_a_v2()
         raiz = Inspeccion.objects.values_list('manifiesto_raiz', flat=True).get(pk=self.inspeccion.pk)
         Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
             manifiesto_tsa_token=_sellar(raiz), manifiesto_tsa_timestamp=timezone.now(),
@@ -143,6 +162,8 @@ class PaqueteContenidoTest(_ConExpediente, TestCase):
             prueba = json.loads(z.read(f'evidencias/{i:03d}_ev{ev.pk}.prueba.json'))
             self.assertEqual((prueba['indice'], prueba['total']), (i, 2))
             self.assertEqual(prueba['raiz'], self.inspeccion.manifiesto_raiz)
+            # En v1 la hoja es el hash de la foto
+            self.assertEqual((prueba['version'], prueba['hoja']), (1, hashlib.sha256(ev.datos).hexdigest()))
             self.assertTrue(merkle.verificar_inclusion(
                 hashlib.sha256(ev.datos).digest(), i, 2, [bytes.fromhex(h) for h in prueba['ruta']], raiz,
             ))
@@ -348,6 +369,161 @@ class PaqueteVerificadorTest(_ConPaqueteExtraido, TestCase):
         os.remove(self._ruta(nombre))
         os.symlink('/dev/zero', self._ruta(nombre))
         self._falla('no es un archivo normal')
+
+
+class PaqueteVerificadorV2Test(PaqueteVerificadorTest):
+    """Los mismos ataques contra un paquete v2, más los de los metadatos y el checklist sellados."""
+
+    version_manifiesto = 2
+
+    def _editar_manifiesto(self, cambio, rehacer_raiz=False):
+        with open(self._ruta('manifiesto/manifiesto.json')) as f:
+            manifiesto = json.load(f)
+        cambio(manifiesto)
+        if rehacer_raiz:
+            manifiesto['raiz'] = merkle.raiz(hojas_del_manifiesto(manifiesto)).hex()
+        with open(self._ruta('manifiesto/manifiesto.json'), 'w') as f:
+            json.dump(manifiesto, f)
+        self._rehacer_sumas()
+
+    def test_paquete_v2_intacto_verifica_tambien_el_checklist(self):
+        resultado = self._verificar()
+        self.assertEqual(resultado.returncode, 0, resultado.stdout + resultado.stderr)
+        self.assertIn('versión 2', resultado.stdout)
+        self.assertIn('checklist sellado (hoja 2)', resultado.stdout)
+
+    def test_estancia_cambiada_no_verifica(self):
+        def cambio(m):
+            m['hojas'][0]['metadatos']['estancia'] = 'Otra'
+        self._editar_manifiesto(cambio)
+        self._falla('raíz recalculada')
+
+    def test_estancia_cambiada_con_la_raiz_rehecha_no_verifica_contra_el_sello(self):
+        def cambio(m):
+            m['hojas'][0]['metadatos']['estancia'] = 'Otra'
+        self._editar_manifiesto(cambio, rehacer_raiz=True)
+        self._falla('raiz.tst sella')
+
+    def test_checklist_cambiado_no_verifica(self):
+        def cambio(m):
+            m['hojas'][-1]['checklist']['estancias'][0]['puntos'][0]['resultado'] = 'DANO'
+        self._editar_manifiesto(cambio)
+        self._falla('raíz recalculada')
+
+    def test_foto_atribuida_a_otra_evidencia_no_verifica(self):
+        def cambio(m):
+            m['hojas'][0]['evidencia'] = m['hojas'][1]['evidencia']
+        self._editar_manifiesto(cambio)
+        self._falla()
+
+    def _editar_expediente(self, cambio):
+        with open(self._ruta('expediente.json')) as f:
+            expediente = json.load(f)
+        cambio(expediente)
+        with open(self._ruta('expediente.json'), 'w') as f:
+            json.dump(expediente, f)
+        self._rehacer_sumas()
+
+    def test_estancia_cambiada_en_el_expediente_no_verifica(self):
+        # El manifiesto y el sello intactos: lo que se enseña tiene que ser lo sellado
+        def cambio(e):
+            e['evidencias'][0]['estancia'] = 'Otra'
+        self._editar_expediente(cambio)
+        self._falla('estancia de expediente.json no es lo sellado')
+
+    def test_descripcion_cambiada_en_el_expediente_no_verifica(self):
+        def cambio(e):
+            e['evidencias'][1]['descripcion'] = 'Sin daños'
+        self._editar_expediente(cambio)
+        self._falla('descripcion de expediente.json no es lo sellado')
+
+    def test_checklist_cambiado_en_el_expediente_no_verifica(self):
+        def cambio(e):
+            e['checklist']['estancias'][0]['puntos'][0]['resultado'] = 'DANO'
+        self._editar_expediente(cambio)
+        self._falla('el checklist de expediente.json no es el sellado')
+
+    def test_checklist_quitado_del_expediente_no_verifica(self):
+        def cambio(e):
+            e['checklist'] = None
+        self._editar_expediente(cambio)
+        self._falla('expediente.json no enseña')
+
+    def test_clave_duplicada_en_el_manifiesto_no_verifica(self):
+        # Otro lector JSON podría quedarse con la primera: el texto tiene que ser inequívoco
+        with open(self._ruta('manifiesto/manifiesto.json')) as f:
+            texto = f.read()
+        with open(self._ruta('manifiesto/manifiesto.json'), 'w') as f:
+            f.write(texto.replace('"version": 2', '"version": 2, "version": 2', 1))
+        self._rehacer_sumas()
+        self._falla('clave duplicada')
+
+    def test_version_desconocida_no_verifica(self):
+        def cambio(m):
+            m['version'] = 3
+        self._editar_manifiesto(cambio)
+        self._falla('versión de manifiesto no admitida')
+
+
+class PaqueteV2ContenidoTest(_ConExpediente, TestCase):
+    version_manifiesto = 2
+
+    def setUp(self):
+        self._crear_expediente()
+
+    def test_cada_prueba_lleva_la_hoja_v2_y_verifica(self):
+        z = _abrir(_construir(self.inspeccion))
+        manifiesto = self.inspeccion.manifiesto
+        raiz = bytes.fromhex(self.inspeccion.manifiesto_raiz)
+        for i, ev in enumerate(self.fotos):
+            prueba = json.loads(z.read(f'evidencias/{i:03d}_ev{ev.pk}.prueba.json'))
+            hoja = datos_hoja(manifiesto['hojas'][i], 2)
+            self.assertEqual((prueba['version'], prueba['hoja']), (2, hoja.hex()))
+            self.assertEqual(prueba['hoja_sha256'], hashlib.sha256(ev.datos).hexdigest())
+            # Dos fotos y el checklist
+            self.assertEqual((prueba['indice'], prueba['total']), (i, 3))
+            self.assertTrue(merkle.verificar_inclusion(
+                hoja, i, 3, [bytes.fromhex(h) for h in prueba['ruta']], raiz,
+            ))
+
+    def test_la_hoja_del_checklist_no_se_trata_como_una_foto(self):
+        z = _abrir(_construir(self.inspeccion))
+        expediente = json.loads(z.read('expediente.json'))
+        self.assertEqual([f['evidencia'] for f in expediente['evidencias']], [ev.pk for ev in self.fotos])
+        self.assertFalse([n for n in z.namelist() if n.startswith('evidencias/002_')])
+
+    def test_el_expediente_enseña_los_metadatos_y_el_checklist_sellados(self):
+        expediente = json.loads(_abrir(_construir(self.inspeccion)).read('expediente.json'))
+        for i, ficha in enumerate(expediente['evidencias']):
+            self.assertTrue(ficha['metadatos_sellados'])
+            self.assertEqual(ficha['estancia'], f'Estancia {i}')
+        checklist = expediente['checklist']
+        self.assertTrue(checklist['sellado'])
+        self.assertEqual({k: v for k, v in checklist.items() if k not in ('sellado', 'nota')},
+                         hoja_checklist()['checklist'])
+
+    def test_manifiesto_sin_arbol_rompe_la_integridad_y_no_da_500(self):
+        from .services.paquete import IntegridadRota
+        manifiesto = {k: v for k, v in self.inspeccion.manifiesto.items() if k != 'arbol'}
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(manifiesto=manifiesto)
+        self.inspeccion.refresh_from_db()
+        with self.assertLogs('inspecciones.services.paquete', level='ERROR'), self.assertRaises(IntegridadRota):
+            _construir(self.inspeccion)
+
+    def test_foto_cambiada_en_el_storage_rompe_la_integridad(self):
+        from .services.paquete import IntegridadRota
+        nombre = self.fotos[0].foto.name
+        default_storage.delete(nombre)
+        default_storage.save(nombre, ContentFile(b'otra foto'))
+        with self.assertLogs('inspecciones.services.paquete', level='ERROR'), self.assertRaises(IntegridadRota):
+            _construir(self.inspeccion)
+
+    def test_manifiesto_guardado_ilegible_rompe_la_integridad(self):
+        from .services.paquete import IntegridadRota
+        Inspeccion.objects.filter(pk=self.inspeccion.pk).update(manifiesto={**self.inspeccion.manifiesto, 'version': 3})
+        self.inspeccion.refresh_from_db()
+        with self.assertLogs('inspecciones.services.paquete', level='ERROR'), self.assertRaises(IntegridadRota):
+            _construir(self.inspeccion)
 
 
 class PaqueteVerificadorTamañosTest(TestCase):

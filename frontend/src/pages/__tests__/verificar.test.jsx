@@ -244,6 +244,43 @@ describe("Verificar: lo que promete", () => {
   });
 });
 
+describe("Verificar: manifiesto v2 (ADR-005)", () => {
+  const v2 = vectores.respuesta_v2;
+
+  it("una foto de un manifiesto v2 sale incluida con el hash de sus metadatos", async () => {
+    calculateSHA256.mockResolvedValue(v2.foto);
+    consultarVerificacion.mockResolvedValue({
+      tipo: "ok",
+      datos: datos({
+        hash: v2.foto,
+        manifiestos: [manifiesto({
+          version: 2, metadatos_sha256: v2.metadatos_sha256,
+          raiz: v2.raiz, indice: v2.indice, total: v2.total, prueba: v2.prueba,
+        })],
+      }),
+    });
+    await comprobar();
+    await screen.findByText(/incluida en este manifiesto/i);
+  });
+
+  it("un v2 sin el hash de los metadatos no culpa a la ruta", async () => {
+    consultarVerificacion.mockResolvedValue({
+      tipo: "ok",
+      datos: datos({ manifiestos: [manifiesto({ version: 2, metadatos_sha256: null })] }),
+    });
+    await comprobar();
+    await screen.findByText(/no se puede comprobar: faltan datos/i);
+    expect(screen.queryByText(/la ruta no lleva a la raíz/i)).toBeNull();
+  });
+
+  it("una versión que no conoce no se da por incluida y lo dice", async () => {
+    consultarVerificacion.mockResolvedValue({ tipo: "ok", datos: datos({ manifiestos: [manifiesto({ version: 9 })] }) });
+    await comprobar();
+    await screen.findByText(/formato de manifiesto que esta página no conoce/i);
+    expect(screen.queryByText(/incluida en este manifiesto/i)).toBeNull();
+  });
+});
+
 describe("Verificar: cuando algo no cuadra", () => {
   it("una prueba que no lleva a la raíz se ve como fallo", async () => {
     consultarVerificacion.mockResolvedValue({

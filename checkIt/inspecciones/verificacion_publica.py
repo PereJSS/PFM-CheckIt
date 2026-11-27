@@ -39,6 +39,12 @@ class ManifiestoVerificacionSerializer(serializers.Serializer):
     indice = serializers.IntegerField()
     total = serializers.IntegerField()
     prueba = serializers.ListField(child=serializers.CharField(), help_text='Ruta de inclusión RFC 6962 en hex.')
+    metadatos_sha256 = serializers.CharField(
+        allow_null=True, min_length=64, max_length=64,
+        help_text='Solo en la versión 2: SHA-256 (hex) de los metadatos sellados de la foto, con sal, '
+                  'sin revelarlos. La hoja es 0x01 ‖ SHA-256 de la foto ‖ este hash. En la versión 1, '
+                  'null: la hoja es el SHA-256 de la foto.',
+    )
     sello = SelloManifiestoSerializer(allow_null=True)
 
 

@@ -18,6 +18,7 @@ import logging
 from ..models import Inspeccion
 from . import merkle
 from .manifiesto import _HASH_HEX
+from .verificador_paquete import hojas_del_manifiesto, metadatos_sha256, version_de
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ def _prueba(consulta, manifiesto, raiz, debe_estar):
         consulta.anomalia('manifiesto con una raíz no válida')
         return None
     try:
+        version = version_de(manifiesto)
         declaradas = manifiesto['hojas']
         if not isinstance(declaradas, list):
             raise TypeError('hojas no es una lista')
@@ -110,15 +112,15 @@ def _prueba(consulta, manifiesto, raiz, debe_estar):
             return None
         # Antes de recorrerlas: un manifiesto corrupto también cuesta
         consulta.hojas_restantes -= len(declaradas)
-        hojas, indice = [], None
-        for n, hoja in enumerate(declaradas):
-            sha256 = hoja['sha256']
-            if not _HASH_HEX.fullmatch(sha256):
-                raise ValueError(f'hoja {n} no es un SHA-256')
-            hojas.append(bytes.fromhex(sha256))
-            if indice is None and sha256 == consulta.hash_sha256:
-                indice = n
-        version, arbol = manifiesto.get('version'), manifiesto.get('arbol')
+        hojas = hojas_del_manifiesto(manifiesto)
+        # En v2 solo las hojas de foto tienen una foto que buscar (el checklist no)
+        indice = next((
+            n for n, hoja in enumerate(declaradas)
+            if (version == 1 or hoja['tipo'] == 'foto') and hoja['sha256'] == consulta.hash_sha256
+        ), None)
+        arbol = manifiesto.get('arbol')
+        # Con él y la foto, quien consulta rehace la hoja v2 sin ver los metadatos (ADR-005)
+        metadatos = metadatos_sha256(declaradas[indice]) if indice is not None and version == 2 else None
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         consulta.anomalia('manifiesto mal formado: %r', exc)
         return None
@@ -135,9 +137,10 @@ def _prueba(consulta, manifiesto, raiz, debe_estar):
         # Se devuelve igual: ocultarlo taparía una manipulación
         consulta.anomalia('la prueba no lleva a la raíz %s', raiz)
     return {
-        'version': version if isinstance(version, int) else None,
+        'version': version,
         'arbol': _texto(arbol),
         'raiz': raiz, 'indice': indice, 'total': len(hojas), 'prueba': [nodo.hex() for nodo in prueba],
+        'metadatos_sha256': metadatos,
     }
 
 

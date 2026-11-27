@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   base64ABytes,
   comprobarRespuesta,
+  datosHoja,
   horaSellada,
   huellaSellada,
   normalizarClave,
@@ -38,6 +39,45 @@ describe("verificarInclusion, con los vectores de merkle.py", () => {
     await expect(
       verificarInclusion(caso.hoja, caso.indice, caso.total, caso.prueba, caso.raiz),
     ).resolves.toBe(false);
+  });
+});
+
+describe("datosHoja, con el vector v2 de verificador_paquete.py", () => {
+  const v2 = vectores.respuesta_v2;
+
+  it("en v1 la hoja es el hash de la foto", () => {
+    expect(datosHoja(v2.foto, { version: 1, metadatos_sha256: null })).toBe(v2.foto);
+  });
+
+  it("en v2 es 0x01, la foto y el hash de los metadatos, igual que en Python", () => {
+    expect(datosHoja(v2.foto, { version: 2, metadatos_sha256: v2.metadatos_sha256 })).toBe(v2.hoja);
+  });
+
+  it.each([
+    ["versión desconocida", { version: 3, metadatos_sha256: v2.metadatos_sha256 }],
+    ["versión en texto", { version: "2", metadatos_sha256: v2.metadatos_sha256 }],
+    ["sin versión", { metadatos_sha256: v2.metadatos_sha256 }],
+    ["v2 sin metadatos", { version: 2, metadatos_sha256: null }],
+    ["v2 con metadatos que no son hex", { version: 2, metadatos_sha256: "zz" }],
+  ])("%s: no hay hoja que comprobar", (_, manifiesto) => {
+    expect(datosHoja(v2.foto, manifiesto)).toBeNull();
+  });
+
+  it("sin una foto en hex o sin un manifiesto que sea un objeto tampoco", () => {
+    expect(datosHoja("zz", { version: 1 })).toBeNull();
+    expect(datosHoja(v2.foto, null)).toBeNull();
+    expect(datosHoja(v2.foto, "v2")).toBeNull();
+  });
+
+  it("una hoja v2 entra en la raíz con su prueba", async () => {
+    await expect(
+      verificarInclusion(v2.hoja, v2.indice, v2.total, v2.prueba, v2.raiz),
+    ).resolves.toBe(true);
+  });
+
+  it("una hoja de 65 bytes que no es de foto no se acepta", async () => {
+    const otra = `02${v2.hoja.slice(2)}`;
+    await expect(verificarInclusion(otra, v2.indice, v2.total, v2.prueba, v2.raiz)).resolves.toBe(false);
   });
 });
 
@@ -122,6 +162,42 @@ describe("comprobarRespuesta", () => {
     anomalias: 0,
     truncado: false,
     ...cambios,
+  });
+
+  it("una foto de un manifiesto v2 se comprueba con el hash de sus metadatos", async () => {
+    const v2 = vectores.respuesta_v2;
+    const datos = respuesta({
+      hash: v2.foto,
+      sello_individual: null,
+      manifiestos: [manifiesto({
+        version: 2, metadatos_sha256: v2.metadatos_sha256,
+        raiz: v2.raiz, indice: v2.indice, total: v2.total, prueba: v2.prueba,
+      })],
+    });
+    const resultado = await comprobarRespuesta(v2.foto, datos);
+    expect(resultado.manifiestos[0].inclusion).toBe(true);
+    expect(resultado.manifiestos[0].version).toBe(2);
+  });
+
+  it("en v2 unos metadatos de otra hoja no llevan a la raíz", async () => {
+    const v2 = vectores.respuesta_v2;
+    const otros = "e".repeat(64);
+    const datos = respuesta({
+      hash: v2.foto,
+      manifiestos: [manifiesto({
+        version: 2, metadatos_sha256: otros,
+        raiz: v2.raiz, indice: v2.indice, total: v2.total, prueba: v2.prueba,
+      })],
+    });
+    const resultado = await comprobarRespuesta(v2.foto, datos);
+    expect(resultado.manifiestos[0].inclusion).toBe(false);
+    expect(resultado.todoCoincide).toBe(false);
+  });
+
+  it("una versión desconocida no se da por incluida", async () => {
+    const resultado = await comprobarRespuesta(r.foto, respuesta({ manifiestos: [manifiesto({ version: 9 })] }));
+    expect(resultado.manifiestos[0].inclusion).toBe(false);
+    expect(resultado.todoCoincide).toBe(false);
   });
 
   it("todo cuadra", async () => {

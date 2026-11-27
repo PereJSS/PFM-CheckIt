@@ -17,11 +17,26 @@ const OID_TSTINFO = "2a864886f70d0109100104";
 const aHex = (bytes) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
-function hashABytes(hex) {
-  if (typeof hex !== "string" || !HASH_HEX.test(hex)) {
+function hashABytes(hex, formato = HASH_HEX) {
+  if (typeof hex !== "string" || !formato.test(hex)) {
     throw new Error("no es un SHA-256 en hexadecimal");
   }
   return Uint8Array.from(hex.match(/../g), (par) => Number.parseInt(par, 16));
+}
+
+// Dato de la hoja que se puede comprobar con una foto (ADR-005): v1 = SHA-256 de la foto;
+// v2 = 0x01 ‖ SHA-256 de la foto ‖ SHA-256 de sus metadatos con sal.
+const HOJA_HEX = /^(?:[0-9a-f]{64}|01[0-9a-f]{128})$/;
+
+// Hoja (hex) que corresponde a `foto` en ese manifiesto, o null si no se sabe rehacerla:
+// una versión desconocida no se da por comprobada.
+export function datosHoja(foto, manifiesto) {
+  if (!esObjeto(manifiesto) || !HASH_HEX.test(foto)) return null;
+  if (manifiesto.version === 1) return foto;
+  if (manifiesto.version === 2 && HASH_HEX.test(manifiesto.metadatos_sha256 ?? "")) {
+    return `01${foto}${manifiesto.metadatos_sha256}`;
+  }
+  return null;
 }
 
 async function sha256(prefijo, ...partes) {
@@ -47,9 +62,9 @@ export async function verificarInclusion(hoja, indice, total, prueba, raiz) {
 
   let bytesHoja, ruta;
   try {
-    bytesHoja = hashABytes(hoja);
+    bytesHoja = hashABytes(hoja, HOJA_HEX);
     hashABytes(raiz);
-    ruta = prueba.map(hashABytes);
+    ruta = prueba.map((nodo) => hashABytes(nodo));
   } catch {
     return false;
   }
@@ -168,10 +183,15 @@ function comprobarSello(sello, huellaEsperada) {
 
 async function comprobarManifiesto(foto, manifiesto) {
   const datos = esObjeto(manifiesto) ? manifiesto : {};
+  const hoja = datosHoja(foto, datos);
   return {
     vigente: datos.vigente === true,
+    version: Number.isInteger(datos.version) ? datos.version : null,
+    // false si no se sabe rehacer la hoja (versión desconocida o v2 sin metadatos_sha256)
+    comprobable: hoja !== null,
     raiz: typeof datos.raiz === "string" ? datos.raiz : null,
-    inclusion: await verificarInclusion(foto, datos.indice, datos.total, datos.prueba, datos.raiz),
+    inclusion:
+      hoja !== null && (await verificarInclusion(hoja, datos.indice, datos.total, datos.prueba, datos.raiz)),
     sello: comprobarSello(datos.sello, datos.raiz),
   };
 }
