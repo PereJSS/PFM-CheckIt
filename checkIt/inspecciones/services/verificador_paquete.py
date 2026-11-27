@@ -171,6 +171,17 @@ def datos_hoja(hoja, version):
     raise ValueError(f'tipo de hoja desconocido: {tipo!r}')
 
 
+def tiene_foto(hoja, version):
+    """Si la hoja corresponde a una foto (en v1, todas; en v2, las de tipo foto)."""
+    return version == 1 or hoja['tipo'] == 'foto'
+
+
+def hoja_de_checklist(manifiesto):
+    """La hoja del checklist de un manifiesto v2 ya validado, o None."""
+    hojas = manifiesto['hojas']
+    return hojas[-1] if hojas and hojas[-1].get('tipo') == 'checklist' else None
+
+
 def metadatos_sha256(hoja):
     """Hash (hex) de los metadatos de una hoja de foto v2; None en las demás. Con la sal
     dentro no deja adivinar los metadatos, así que se puede enseñar sin ellos."""
@@ -332,9 +343,8 @@ def comprobar_manifiesto(informe):
         cuadra = False
         informe.fallo(f'manifiesto/raiz.tst sella {sellada}, no la raíz recalculada')
     # El checklist no tiene foto: queda probado si su hoja entra en la raíz sellada
-    for indice, hoja in enumerate(manifiesto['hojas']):
-        if version == 2 and hoja['tipo'] == 'checklist' and cuadra:
-            informe.ok(f'checklist sellado (hoja {indice})')
+    if version == 2 and cuadra and hoja_de_checklist(manifiesto):
+        informe.ok(f'checklist sellado (hoja {len(hojas) - 1})')
     return manifiesto
 
 
@@ -345,7 +355,7 @@ def comprobar_evidencias(informe, manifiesto):
     version = version_de(manifiesto)
     hojas = hojas_del_manifiesto(manifiesto)
     # Solo las hojas de foto necesitan una foto
-    vistas = {i for i, h in enumerate(manifiesto['hojas']) if version == 2 and h['tipo'] != 'foto'}
+    vistas = {i for i, h in enumerate(manifiesto['hojas']) if not tiene_foto(h, version)}
     for ficha in expediente['evidencias']:
         archivo = ficha['archivo']
         try:
@@ -359,7 +369,7 @@ def comprobar_evidencias(informe, manifiesto):
             informe.fallo(f'{archivo}: su prueba apunta a una hoja que no existe')
             continue
         hoja = manifiesto['hojas'][indice]
-        if version == 2 and (hoja['tipo'] != 'foto' or hoja['evidencia'] != ficha.get('evidencia')):
+        if not tiene_foto(hoja, version) or (version == 2 and hoja['evidencia'] != ficha.get('evidencia')):
             informe.fallo(f'{archivo}: la hoja {indice} no es la de esta foto')
             continue
         real = hashlib.sha256(datos).hexdigest()
@@ -396,7 +406,7 @@ _NOTAS_CHECKLIST = ('sellado', 'nota')
 
 def comprobar_checklist(informe, manifiesto, expediente):
     """v2: el checklist de expediente.json es el de la hoja sellada, y solo hay uno si la hay."""
-    hoja = next((h for h in manifiesto['hojas'] if h['tipo'] == 'checklist'), None)
+    hoja = hoja_de_checklist(manifiesto)
     mostrado = expediente.get('checklist')
     if hoja is None and mostrado is None:
         return

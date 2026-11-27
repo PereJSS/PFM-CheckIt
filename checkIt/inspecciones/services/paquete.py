@@ -27,7 +27,7 @@ from . import merkle
 from .almacen import abrir_pdf
 from .checklist import checklist_canonico
 from .tsa import PERFIL_EVIDENCIAS, PERFIL_MANIFIESTO, configuracion, url_segura
-from .verificador_paquete import CAMPOS_SELLADOS, hojas_del_manifiesto, version_de
+from .verificador_paquete import CAMPOS_SELLADOS, hoja_de_checklist, hojas_del_manifiesto, tiene_foto, version_de
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def _añadir_evidencias(paquete, inspeccion):
     evidencias = inspeccion.evidencias.in_bulk()
     fichas = []
     for indice, hoja in enumerate(manifiesto['hojas']):
-        if version == 2 and hoja['tipo'] != 'foto':
+        if not tiene_foto(hoja, version):
             # El checklist no tiene foto: verificar.py lo comprueba desde manifiesto.json
             continue
         evidencia = evidencias.pop(hoja['evidencia'], None)
@@ -259,7 +259,7 @@ def _añadir_certificados_tsa(paquete):
 def _checklist(inspeccion):
     if version_de(inspeccion.manifiesto) == 2:
         # El sellado en la última hoja, no el de la BD: verificar.py los compara
-        hoja = next((h for h in inspeccion.manifiesto['hojas'] if h['tipo'] == 'checklist'), None)
+        hoja = hoja_de_checklist(inspeccion.manifiesto)
         if hoja is None:
             return None
         return {

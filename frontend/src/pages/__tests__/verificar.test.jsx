@@ -278,6 +278,9 @@ describe("Verificar: manifiesto v2 (ADR-005)", () => {
     await comprobar();
     await screen.findByText(/formato de manifiesto que esta página no conoce/i);
     expect(screen.queryByText(/incluida en este manifiesto/i)).toBeNull();
+    // El resumen lo explica, sin acusar al servidor de que algo no cuadra
+    screen.getByText(/algún manifiesto no se puede comprobar aquí/i);
+    expect(screen.queryByText(/la respuesta no se sostiene/i)).toBeNull();
   });
 });
 

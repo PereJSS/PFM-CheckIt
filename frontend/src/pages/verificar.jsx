@@ -40,11 +40,16 @@ function avisosDe(comprobacion) {
   if (comprobacion.selloIndividual) sellos.push(comprobacion.selloIndividual);
   const noCuadra =
     !comprobacion.hashCoincide ||
-    comprobacion.manifiestos.some((m) => !m.inclusion) ||
+    comprobacion.manifiestos.some((m) => m.comprobable && !m.inclusion) ||
     sellos.some((sello) => sello.estado === "no_coincide" || sello.estado === "ilegible");
   if (noCuadra) {
     avisos.push(
       "La respuesta no se sostiene: lo que ha enviado el servidor no cuadra con el cálculo hecho aquí. Revisa cada comprobación.",
+    );
+  }
+  if (comprobacion.manifiestos.some((m) => !m.comprobable)) {
+    avisos.push(
+      "Algún manifiesto no se puede comprobar aquí: faltan datos o es un formato que esta página no conoce.",
     );
   }
   if (!comprobacion.horasCoinciden) {

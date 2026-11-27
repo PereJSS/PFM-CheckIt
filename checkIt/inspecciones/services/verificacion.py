@@ -18,7 +18,7 @@ import logging
 from ..models import Inspeccion
 from . import merkle
 from .manifiesto import _HASH_HEX
-from .verificador_paquete import hojas_del_manifiesto, metadatos_sha256, version_de
+from .verificador_paquete import hojas_del_manifiesto, metadatos_sha256, tiene_foto, version_de
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def _prueba(consulta, manifiesto, raiz, debe_estar):
         # En v2 solo las hojas de foto tienen una foto que buscar (el checklist no)
         indice = next((
             n for n, hoja in enumerate(declaradas)
-            if (version == 1 or hoja['tipo'] == 'foto') and hoja['sha256'] == consulta.hash_sha256
+            if tiene_foto(hoja, version) and hoja['sha256'] == consulta.hash_sha256
         ), None)
         arbol = manifiesto.get('arbol')
         # Con él y la foto, quien consulta rehace la hoja v2 sin ver los metadatos (ADR-005)

@@ -70,15 +70,17 @@ def _foto(n):
 class _ConExpediente:
     """Inspección completada con `n` fotos selladas, manifiesto sellado y PDF de esa raíz."""
 
-    # 2: el manifiesto congelado se rehace en formato v2 (ADR-005) antes de sellarlo
+    # Con 2, el manifiesto congelado se rehace en formato v2 (ADR-005) antes de sellarlo
     version_manifiesto = 1
+    # Solo en v2: si el manifiesto lleva la hoja del checklist
+    con_checklist = True
 
     def _pasar_a_v2(self):
         manifiesto = Inspeccion.objects.values_list('manifiesto', flat=True).get(pk=self.inspeccion.pk)
         hojas = [
             hoja_foto(h['evidencia'], h['sha256'], sal=f'{i:032x}', estancia=f'Estancia {i}')
             for i, h in enumerate(manifiesto['hojas'])
-        ] + [hoja_checklist()]
+        ] + ([hoja_checklist()] if self.con_checklist else [])
         manifiesto = {**manifiesto, 'version': 2, 'hojas': hojas}
         manifiesto['raiz'] = merkle.raiz(hojas_del_manifiesto(manifiesto)).hex()
         Inspeccion.objects.filter(pk=self.inspeccion.pk).update(
@@ -410,11 +412,19 @@ class PaqueteVerificadorV2Test(PaqueteVerificadorTest):
         self._editar_manifiesto(cambio)
         self._falla('raíz recalculada')
 
-    def test_foto_atribuida_a_otra_evidencia_no_verifica(self):
+    def test_foto_atribuida_a_otra_evidencia_en_el_manifiesto_no_verifica(self):
         def cambio(m):
             m['hojas'][0]['evidencia'] = m['hojas'][1]['evidencia']
         self._editar_manifiesto(cambio)
-        self._falla()
+        self._falla('la evidencia de la hoja no es la de sus metadatos')
+
+    def test_fichas_con_las_evidencias_intercambiadas_no_verifican(self):
+        # El manifiesto intacto: el expediente atribuye cada foto a la evidencia de la otra
+        def cambio(e):
+            a, b = e['evidencias']
+            a['evidencia'], b['evidencia'] = b['evidencia'], a['evidencia']
+        self._editar_expediente(cambio)
+        self._falla('no es la de esta foto')
 
     def _editar_expediente(self, cambio):
         with open(self._ruta('expediente.json')) as f:
@@ -436,6 +446,16 @@ class PaqueteVerificadorV2Test(PaqueteVerificadorTest):
             e['evidencias'][1]['descripcion'] = 'Sin daños'
         self._editar_expediente(cambio)
         self._falla('descripcion de expediente.json no es lo sellado')
+
+    def test_punto_y_hora_cambiados_en_el_expediente_no_verifican(self):
+        for campo, valor in (('punto', 999), ('capturada_en', '2020-01-01T00:00:00+00:00')):
+            with self.subTest(campo=campo):
+                def cambio(e):
+                    e['evidencias'][0][campo] = valor
+                self._editar_expediente(cambio)
+                self._falla(f'{campo} de expediente.json no es lo sellado')
+                # Deshace para el siguiente caso
+                _abrir(_construir(self.inspeccion)).extractall(self.dir.name)
 
     def test_checklist_cambiado_en_el_expediente_no_verifica(self):
         def cambio(e):
@@ -463,6 +483,27 @@ class PaqueteVerificadorV2Test(PaqueteVerificadorTest):
             m['version'] = 3
         self._editar_manifiesto(cambio)
         self._falla('versión de manifiesto no admitida')
+
+
+class PaqueteVerificadorV2SinChecklistTest(_ConPaqueteExtraido, TestCase):
+    version_manifiesto = 2
+    con_checklist = False
+
+    def test_sin_checklist_verifica(self):
+        resultado = self._verificar()
+        self.assertEqual(resultado.returncode, 0, resultado.stdout + resultado.stderr)
+        self.assertNotIn('checklist', resultado.stdout)
+
+    def test_checklist_inventado_en_el_expediente_no_verifica(self):
+        with open(self._ruta('expediente.json')) as f:
+            expediente = json.load(f)
+        expediente['checklist'] = {'sellado': True, **hoja_checklist()['checklist']}
+        with open(self._ruta('expediente.json'), 'w') as f:
+            json.dump(expediente, f)
+        PaqueteVerificadorTest._rehacer_sumas(self)
+        resultado = self._verificar()
+        self.assertNotEqual(resultado.returncode, 0, resultado.stdout)
+        self.assertIn('enseña un checklist que no está en el manifiesto sellado', resultado.stdout)
 
 
 class PaqueteV2ContenidoTest(_ConExpediente, TestCase):

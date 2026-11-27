@@ -59,6 +59,8 @@ describe("datosHoja, con el vector v2 de verificador_paquete.py", () => {
     ["sin versión", { metadatos_sha256: v2.metadatos_sha256 }],
     ["v2 sin metadatos", { version: 2, metadatos_sha256: null }],
     ["v2 con metadatos que no son hex", { version: 2, metadatos_sha256: "zz" }],
+    ["v2 con metadatos en mayúsculas", { version: 2, metadatos_sha256: "A".repeat(64) }],
+    ["v2 con metadatos cortos", { version: 2, metadatos_sha256: "a".repeat(63) }],
   ])("%s: no hay hoja que comprobar", (_, manifiesto) => {
     expect(datosHoja(v2.foto, manifiesto)).toBeNull();
   });
